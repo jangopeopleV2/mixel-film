@@ -1,6 +1,6 @@
 # filmcraft-speech
 
-Speech-to-text for FilmCraft's Text panel ▸ Transcript (L2). User-facing behaviour, commands and
+Speech-to-text for MIXEL Film's Text panel ▸ Transcript (L2). User-facing behaviour, commands and
 model handling: [docs/transcripts.md](../../docs/transcripts.md).
 
 - `Transcriber` trait (mono 16 kHz in, word-timed `filmcraft_project::Transcript` out) and

@@ -5,7 +5,7 @@
 //! [`filmcraft_render::preview`]. A rendered segment is a ProRes 422 QuickTime file named
 //! `<hash>.mov` in the project's preview cache directory:
 //!
-//! * saved project `/path/Film.fcproj` → `/path/FilmCraft Previews/Film/`;
+//! * saved project `/path/Film.fcproj` → `/path/MIXEL Film Previews/Film/`;
 //! * unsaved project → a per-process folder in the system temp dir; its files move into the
 //!   project's folder on the first save.
 //!
@@ -410,7 +410,7 @@ fn default_temp_dir() -> Option<PathBuf> {
     if cfg!(target_arch = "wasm32") {
         return None;
     }
-    Some(untitled_dir(&crate::temp_dir().join("FilmCraft Previews")))
+    Some(untitled_dir(&crate::temp_dir().join("MIXEL Film Previews")))
 }
 
 /// A fresh per-process folder for an unsaved project's previews under `root`.
@@ -423,7 +423,7 @@ fn untitled_dir(root: &Path) -> PathBuf {
 pub fn dir_for_project(project_path: &str) -> PathBuf {
     let p = Path::new(project_path);
     let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".into());
-    p.parent().unwrap_or(Path::new(".")).join("FilmCraft Previews").join(stem)
+    p.parent().unwrap_or(Path::new(".")).join("MIXEL Film Previews").join(stem)
 }
 
 // ---------------------------------------------------------------- commands

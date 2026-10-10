@@ -13,7 +13,7 @@ release: 1
 section: video
 priority: optional
 maintainer: ${FILMCRAFT_MAINTAINER}
-vendor: Learning Machines LLC
+vendor: MIXEL
 homepage: https://getartcraft.com/apps/filmcraft
 license: MIT OR Apache-2.0
 description: |-

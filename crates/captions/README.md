@@ -1,6 +1,6 @@
 # filmcraft-captions
 
-Caption files and caption burn-in for FilmCraft (layer L2: depends on `filmcraft-time`,
+Caption files and caption burn-in for MIXEL Film (layer L2: depends on `filmcraft-time`,
 `filmcraft-color`, `filmcraft-project`, `filmcraft-text` and `roxmltree` for TTML).
 
 The caption *model* (caption tracks in a sequence, captions, track style) lives in

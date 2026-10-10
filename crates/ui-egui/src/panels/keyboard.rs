@@ -128,12 +128,12 @@ pub const COMMANDS: &[UiCommand] = &[
     uic!("textPanel.rippleDelete", "Ripple Delete", [], None),
     uic!("textPanel.showProgramTranscript", "Show Program Transcript", [], None),
     uic!("graphics.beginTextEditing", "Begin Text Editing for a Graphic Layer", [], Some("Cmd+Alt+'")),
-    uic!("help.filmcraftHelp", "FilmCraft Help…", ["Help"], Some("F1")),
-    uic!("app.quit", "Quit FilmCraft", [], Some("Cmd+Q")),
+    uic!("help.filmcraftHelp", "MIXEL Film Help…", ["Help"], Some("F1")),
+    uic!("app.quit", "Quit MIXEL Film", [], Some("Cmd+Q")),
 ];
 
-/// FilmCraft's documentation (Help ▸ FilmCraft Help…, F1).
-pub const HELP_URL: &str = "https://github.com/storytold/filmcraft/tree/main/docs";
+/// MIXEL Film's documentation (Help ▸ MIXEL Film Help…, F1).
+pub const HELP_URL: &str = "https://github.com/jangopeopleV2/mixel-film/tree/main/docs";
 
 const HEIGHT_STEP: f32 = 12.0;
 const MIN_TRACK_H: f32 = 24.0;

@@ -1,4 +1,4 @@
-# FilmCraft app icon
+# MIXEL Film app icon
 
 **Creature:** an owl with ear tufts, in a frontal head-and-shoulders portrait. It is the template the
 other Crafting App icons follow.
@@ -11,7 +11,7 @@ Exactly three colours:
 |---|---|---|
 | Ink | `#0b0b0c` | line work and the figure's contour |
 | Paper | `#efe9dc` | the figure (the owl) |
-| FilmCraft violet (app colour) | `#8b5cf6` | the full-bleed field behind the figure |
+| MIXEL Film violet (app colour) | `#8b5cf6` | the full-bleed field behind the figure |
 
 ## Geometry and style
 
@@ -38,7 +38,7 @@ palette and traces the ink with potrace. Licence: [LICENSE.txt](LICENSE.txt) (MI
 | `filmcraft-macos-512.png` | runtime Dock icon on macOS (embedded by `apps/filmcraft/src/main.rs`) |
 | `filmcraft.icns` | macOS bundle icon (`CFBundleIconFile`) |
 | `filmcraft.ico` | Windows icon, 16–256 px (embedded in `filmcraft.exe` by `apps/filmcraft/build.rs`) |
-| `hicolor/<size>/apps/ai.storyteller.filmcraft.png`, `hicolor/scalable/…svg` | Linux icon theme, used by `packaging/linux/ai.storyteller.filmcraft.desktop` |
+| `hicolor/<size>/apps/ch.mixel.film.png`, `hicolor/scalable/…svg` | Linux icon theme, used by `packaging/linux/ch.mixel.film.desktop` |
 
 The web app's `apps/filmcraft-web/web/favicon.png` (128 px) comes from the same artwork.
 
@@ -48,7 +48,7 @@ The web app's `apps/filmcraft-web/web/favicon.png` (128 px) comes from the same 
   icon when the app runs unbundled. A future `.app` bundle points `CFBundleIconFile` at `filmcraft.icns`.
 - **Windows:** `build.rs` embeds `filmcraft.ico` as the exe's resource icon (Explorer, Start menu,
   pinned taskbar), and the runtime icon covers the window, taskbar and Alt-Tab.
-- **Linux:** the runtime icon plus `with_app_id("ai.storyteller.filmcraft")`, which Wayland matches to
+- **Linux:** the runtime icon plus `with_app_id("ch.mixel.film")`, which Wayland matches to
   the `.desktop` file. Install the `hicolor/` tree under `/usr/share/icons/hicolor/` and the desktop
   file under `/usr/share/applications/`.
 
