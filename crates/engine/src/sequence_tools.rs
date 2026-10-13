@@ -31,7 +31,9 @@ use filmcraft_project::{AudioChannels, ClipId, ItemId, Label, Marker, MarkerId, 
 use filmcraft_time::{Tick, TimeRange};
 use serde_json::{Value, json};
 
-use crate::commands::{CommandSpec, always, bad, bool_p, clips_p, has_seq, str_p, time_p, track_p, with_links};
+use crate::commands::{
+    CommandSpec, always, bad, bool_p, clips_p, has_seq, marker_color_p, sequence_time_p, source_mark_time, str_p, time_p, track_p, with_links,
+};
 use crate::{EngineError, Result, Session};
 
 type Run = fn(&mut Session, &Value) -> Result<Value>;
@@ -64,7 +66,7 @@ pub(crate) fn splice(v: &mut Vec<CommandSpec>) {
     }
 }
 
-const SPLIT: &str = r#"{"time":ticks?,"target":"program|source"}"#;
+const SPLIT: &str = r#"{"time":ticks?,"frame":i64?,"seconds":f64?,"timecode":str?,"target":"program|source"}"#;
 
 fn groups() -> Vec<(&'static str, Vec<CommandSpec>)> {
     vec![
@@ -131,7 +133,7 @@ fn groups() -> Vec<(&'static str, Vec<CommandSpec>)> {
                 "Delete Tracks…",
                 &["Sequence"],
                 None,
-                r#"{"video":"empty"|"V2"|id?,"audio":"empty"|"A2"|id?}"#,
+                r#"{"video":"empty"|"V2"|id?,"audio":"empty"|"A2"|id?,"captions":"empty"|"C2"|id?}"#,
                 has_seq,
                 delete_tracks,
             )],
@@ -206,10 +208,10 @@ fn groups() -> Vec<(&'static str, Vec<CommandSpec>)> {
                     r#"{"time":ticks?,"name":str?,"comment":str?,"color":label?}"#,
                     has_seq,
                     |s, p| {
-                        let t = time_p(s, p, "").unwrap_or(s.playhead());
+                        let t = sequence_time_p(s, p, "", "markers.addChapter")?.unwrap_or(s.playhead());
                         let n = s.active_sequence().map(|q| q.markers.iter().filter(|m| m.kind == MarkerKind::Chapter).count()).unwrap_or(0) + 1;
                         let name = str_p(p, "name").map(str::to_string).unwrap_or_else(|| format!("Chapter {n}"));
-                        let id = add_marker(s, "Add Chapter Marker", t, Tick::ZERO, MarkerKind::Chapter, name, p)?;
+                        let id = add_marker(s, "markers.addChapter", "Add Chapter Marker", t, Tick::ZERO, MarkerKind::Chapter, name, p)?;
                         Ok(json!({"marker": id.0}))
                     },
                 ),
@@ -723,6 +725,55 @@ pub(crate) fn add_tracks(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"video": video, "audio": audio, "submix": submix}))
 }
 
+/// `timeline.place` names `"new"` as its `track` or `audioTrack`.
+pub(crate) fn wants_new_track(p: &Value) -> bool {
+    ["track", "audioTrack"].iter().any(|k| p.get(*k).and_then(Value::as_str).is_some_and(|v| v.eq_ignore_ascii_case("new")))
+}
+
+/// `timeline.place` with `"track":"new"` and/or `"audioTrack":"new"` (#483: media dropped in the
+/// empty space above the video tracks or below the audio tracks): a track is added after the
+/// last one of its kind for each stream the item carries (and the call enables), then the clip
+/// goes on it. One undo step; when the placement fails, the new tracks go away again.
+pub(crate) fn place_on_new_tracks(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "timeline.place";
+    let item = crate::commands::item_p(p, "item").ok_or_else(|| bad(cmd, "need `item`"))?;
+    s.project.item(item).ok_or_else(|| bad(cmd, "no such item"))?;
+    let (video, audio) = s.project.source_streams(item);
+    let is_new = |k: &str| p.get(k).and_then(Value::as_str).is_some_and(|v| v.eq_ignore_ascii_case("new"));
+    let enabled = |k: &str| p.get(k).and_then(Value::as_bool).unwrap_or(true);
+    let new_v = is_new("track") && video && enabled("video");
+    let new_a = is_new("audioTrack") && audio && enabled("audio");
+    if !new_v && !new_a {
+        return Err(bad(cmd, "no new track to add: the item has no picture or sound for it"));
+    }
+    let added = add_tracks(s, &json!({"video": u64::from(new_v), "audio": u64::from(new_a)}))?;
+    let mark = s.history.undo.len();
+    let mut q = p.clone();
+    for (key, kind) in [("track", "video"), ("audioTrack", "audio")] {
+        if is_new(key) {
+            q[key] = added.get(kind).and_then(|ids| ids.get(0)).cloned().unwrap_or(Value::Null);
+        }
+    }
+    let place = crate::commands::find(cmd).ok_or_else(|| EngineError::UnknownCommand(cmd.into()))?.run;
+    match place(s, &q) {
+        Ok(v) => {
+            // the new tracks and the clip are one undo step
+            if mark >= 1
+                && s.history.undo.len() == mark + 1
+                && let (Some((label, _)), Some((_, before))) = (s.history.undo.pop(), s.history.undo.pop())
+            {
+                s.history.undo.push((label, before));
+            }
+            Ok(v)
+        }
+        Err(e) => {
+            s.undo();
+            s.history.redo.pop();
+            Err(e)
+        }
+    }
+}
+
 fn delete_tracks(s: &mut Session, p: &Value) -> Result<Value> {
     let seq_id = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
     let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
@@ -748,6 +799,18 @@ fn delete_tracks(s: &mut Session, p: &Value) -> Result<Value> {
         }
         doomed.extend(mine);
     }
+    // caption tracks: unlike video/audio, a sequence may have none, so all of them can go
+    match p.get("captions") {
+        None | Some(Value::Null) => {}
+        Some(v) if v.as_str().is_some_and(|x| matches!(x, "empty" | "allEmpty" | "all-empty")) => {
+            doomed.extend(q.caption_tracks.iter().filter(|t| t.captions.is_empty()).map(|t| t.id));
+        }
+        Some(v @ (Value::String(_) | Value::Number(_))) => {
+            let id = crate::captions::track_param(s, &json!({"track": v})).ok_or_else(|| bad("sequence.deleteTracks", "unknown caption track"))?;
+            doomed.push(id);
+        }
+        Some(_) => return Err(bad("sequence.deleteTracks", "`captions` must be \"empty\", a name like \"C2\" or a track id")),
+    }
     if doomed.is_empty() {
         return Err(EngineError::Other("no tracks to delete".into()));
     }
@@ -755,7 +818,9 @@ fn delete_tracks(s: &mut Session, p: &Value) -> Result<Value> {
     s.edit_sequence("Delete Tracks", |q, _, st| {
         q.video_tracks.retain(|t| !doomed.contains(&t.id));
         q.audio_tracks.retain(|t| !doomed.contains(&t.id));
+        q.caption_tracks.retain(|t| !doomed.contains(&t.id));
         st.selection.retain(|c| q.find_item(*c).is_some());
+        st.caption_selection.retain(|c| q.find_caption(*c).is_some());
         if let Some(tg) = st.targeting.get_mut(&seq_id) {
             tg.targeted.retain(|t| !doomed.contains(t));
             if tg.video_dest.is_some_and(|t| doomed.contains(&t)) {
@@ -833,7 +898,7 @@ fn mark_split(s: &mut Session, p: &Value, side: Side) -> Result<Value> {
     let label = format!("Mark Split {}", side.label());
     if str_p(p, "target") == Some("source") {
         let item = s.state.source_item.ok_or_else(|| EngineError::Other("no clip in the Source monitor".into()))?;
-        let t = p.get("time").and_then(Value::as_i64).map(Tick).unwrap_or(s.state.source_playhead);
+        let t = source_mark_time(s, p, item);
         let split = s.edit(&label, |pr, _| {
             let it = pr.item_mut(item).ok_or_else(|| EngineError::Other("no such item".into()))?;
             side.set(&mut it.split, t);
@@ -900,9 +965,9 @@ pub fn ripple_markers(markers: &mut Vec<Marker>, from: Tick, shift: Tick) {
     markers.sort_by_key(|m| m.start);
 }
 
-fn add_marker(s: &mut Session, label: &str, t: Tick, dur: Tick, kind: MarkerKind, name: String, p: &Value) -> Result<MarkerId> {
+fn add_marker(s: &mut Session, cmd: &str, label: &str, t: Tick, dur: Tick, kind: MarkerKind, name: String, p: &Value) -> Result<MarkerId> {
     let comment = str_p(p, "comment").unwrap_or("").to_string();
-    let color = str_p(p, "color").and_then(Label::from_name).unwrap_or(Label::Green);
+    let color = marker_color_p(p, cmd)?.unwrap_or(Label::Green);
     s.edit_sequence(label, |q, ctx, _| {
         let id = MarkerId(ctx.alloc());
         q.markers.push(Marker { id, start: t, duration: dur, name, comment, kind, color });
@@ -915,7 +980,7 @@ fn add_marker(s: &mut Session, label: &str, t: Tick, dur: Tick, kind: MarkerKind
 /// `duration` say otherwise) at the playhead.
 fn add_range_marker(s: &mut Session, p: &Value) -> Result<Value> {
     let rate = s.sequence_rate();
-    let t = time_p(s, p, "").unwrap_or(s.playhead());
+    let t = sequence_time_p(s, p, "", "markers.addRange")?.unwrap_or(s.playhead());
     let dur = p
         .get("duration")
         .and_then(Value::as_i64)
@@ -926,7 +991,7 @@ fn add_range_marker(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad("markers.addRange", "the duration must be positive"));
     }
     let name = str_p(p, "name").unwrap_or("").to_string();
-    let id = add_marker(s, "Add Range Marker", t, dur, MarkerKind::Comment, name, p)?;
+    let id = add_marker(s, "markers.addRange", "Add Range Marker", t, dur, MarkerKind::Comment, name, p)?;
     Ok(json!({"marker": id.0}))
 }
 
@@ -936,7 +1001,7 @@ fn add_range_marker_in_out(s: &mut Session, p: &Value) -> Result<Value> {
     let (Some(i), Some(o)) = (q.mark_in, q.mark_out) else { return Err(EngineError::Other("mark an In and an Out point first".into())) };
     let dur = o + q.settings.frame_rate.frame_duration() - i;
     let name = str_p(p, "name").unwrap_or("").to_string();
-    let id = add_marker(s, "Add Range Marker", i, dur, MarkerKind::Comment, name, p)?;
+    let id = add_marker(s, "markers.addRangeInOut", "Add Range Marker", i, dur, MarkerKind::Comment, name, p)?;
     Ok(json!({"marker": id.0}))
 }
 

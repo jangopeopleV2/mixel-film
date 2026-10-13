@@ -19,3 +19,5 @@ Builds made with craft-fonts (CRAFT_FONTS_DIR; all official releases) also embed
 https://github.com/storytold/craft-fonts/blob/main/ATTRIBUTION.md (BIZ UDPGothic, Shippori Mincho,
 BIZ UDMincho) — OFL-1.1. Their licence texts ship with the packages as OFL-<family>.txt.
 Public-domain film and NASA frames and CC0 music shown in README screenshots (docs/images/) — public domain / CC0-1.0. See ATTRIBUTION.md.
+
+MIXEL automatic font fallback policy (2026-10-13): Source Han family names are retired from automatic CJK fallback chains. Existing Noto and platform font candidates remain, and explicitly selected or supplied document fonts retain their matching behavior. No Source Han font binary is bundled.

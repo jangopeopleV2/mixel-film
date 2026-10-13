@@ -77,6 +77,13 @@ pub(crate) fn dec(c: [f32; 3]) -> [f32; 3] {
     [srgb_to_linear(c[0].clamp(0.0, 1.0)), srgb_to_linear(c[1].clamp(0.0, 1.0)), srgb_to_linear(c[2].clamp(0.0, 1.0))]
 }
 
+/// Stable seed for the *exact* frame timestamp. A fixed 30 Hz quantizer
+/// would reuse the same noise field at 60/120 fps and can repeat at 30 fps
+/// through floating-point rounding of seconds.
+pub(crate) fn noise_frame_seed(cx: &FxCtx) -> u64 {
+    cx.t.0 as u64
+}
+
 pub(crate) fn hash3(x: usize, y: usize, z: u64) -> f32 {
     let mut h = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F) ^ z.wrapping_mul(0x1656_67B1_9E37_79F9);
     h ^= h >> 31;
@@ -86,6 +93,23 @@ pub(crate) fn hash3(x: usize, y: usize, z: u64) -> f32 {
 }
 
 /// Apply one effect. Unknown/unimplemented ids are a no-op (they still round-trip in the project).
+/// Largest Median radius in source pixels (the parameter's range).
+const MEDIAN_MAX_RADIUS: f32 = 100.0;
+
+/// The Median radius in working-image pixels. Radius is authored in source pixels and `px_scale`
+/// converts to the working image (no cap at 4 working pixels: that made Radius > 4 look the same
+/// at full resolution). It stays within the parameter's range whatever a project file says, since
+/// the filter costs radius² per pixel, and within the image.
+fn median_radius(radius: f32, px_scale: f32, longest_side: usize) -> isize {
+    let scale = if px_scale.is_finite() { px_scale.max(0.0) } else { 1.0 };
+    let r = radius * scale;
+    if !(r.is_finite() && r > 0.0) {
+        return 0;
+    }
+    let cap = (MEDIAN_MAX_RADIUS * scale).min(longest_side.max(1) as f32);
+    r.round().clamp(0.0, cap) as isize
+}
+
 pub fn apply(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
     if !e.enabled || img.w == 0 || img.h == 0 {
         return;
@@ -101,7 +125,7 @@ pub fn apply(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
     match e.effect.as_str() {
         "lumetri" => lumetri(img, e, cx),
         "median" => {
-            let r = (f(e, "radius", cx) * cx.px_scale).round().clamp(0.0, 4.0) as isize;
+            let r = median_radius(f(e, "radius", cx), cx.px_scale, img.w.max(img.h));
             if r > 0 {
                 median(img, r);
             }
@@ -110,7 +134,7 @@ pub fn apply(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
             let amt = f(e, "amount", cx) / 100.0;
             let colored = b(e, "color");
             let clip = b(e, "clip");
-            let frame = (cx.seconds * 30.0) as u64;
+            let frame = noise_frame_seed(cx);
             let w = img.w;
             img.px.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
                 for x in 0..w {
@@ -679,7 +703,7 @@ fn lumetri(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
         v = v.map(|q| l3 + (q - l3) * s);
         // vignette
         if va.abs() > 1e-4 {
-            let nx = (x as f32 / w - 0.5) * 2.0 * (1.0 + vround * 0.0) * if vround < 0.0 { aspect.powf(-vround) } else { 1.0 };
+            let nx = (x as f32 / w - 0.5) * 2.0 * crate::gpufx::lumetri_vignette_aspect(aspect, vround);
             let ny = (y as f32 / h - 0.5) * 2.0;
             let d = (nx * nx + ny * ny).sqrt() / std::f32::consts::SQRT_2;
             let edge = ((d - vmid * 0.9) / (vfeather.max(0.01) * 0.9)).clamp(0.0, 1.0);
@@ -883,6 +907,21 @@ pub(crate) fn mosaic(img: &mut Image, bx: usize, by: usize) {
 
 #[cfg(test)]
 mod tests {
+    use super::median_radius;
+
+    /// A project file's Median radius stays within the parameter's 0–100 range (scaled to the
+    /// working image) and the image: 1e9 used to run a radius-sized window over every pixel.
+    #[test]
+    fn median_radius_stays_in_the_parameter_range() {
+        assert_eq!(median_radius(1e9, 1.0, 4096), 100);
+        assert_eq!(median_radius(1e9, 0.5, 4096), 50);
+        assert_eq!(median_radius(1e9, 1.0, 40), 40);
+        assert_eq!(median_radius(12.0, 1.0, 4096), 12, "Radius above 4 keeps its full size");
+        assert_eq!(median_radius(f32::NAN, 1.0, 4096), 0);
+        assert_eq!(median_radius(-3.0, 1.0, 4096), 0);
+        assert_eq!(median_radius(8.0, f32::INFINITY, 4096), 8);
+    }
+
     use super::*;
     use filmcraft_project::find_effect;
 
@@ -1514,5 +1553,58 @@ mod lumetri_cpu_parity_tests {
             }
             eprintln!("{name}: max sample diff vs fn lumetri: {max_diff:.2e}");
         }
+    }
+
+    /// #719: positive Roundness rounds the Lumetri vignette (it used to be ignored), +100
+    /// is a circle and negative values widen the oval, on the CPU path and the GPU op alike.
+    #[test]
+    fn lumetri_vignette_roundness_shapes_the_vignette() {
+        let (w, h) = (80usize, 40usize);
+        let cx = FxCtx {
+            t: Tick::ZERO,
+            px_scale: 1.0,
+            seconds: 0.0,
+            timecode: "",
+            clip_name: "",
+            project: None,
+            env: None,
+            working: filmcraft_color::WorkingSpace::Rec709,
+        };
+        let render = |roundness: f64| {
+            let e = effect(&[
+                ("basic_on", ParamValue::Bool(false)),
+                ("creative_on", ParamValue::Bool(false)),
+                ("vignette_amount", fl(-3.0)),
+                ("vignette_roundness", fl(roundness)),
+            ]);
+            let grey = Image { w, h, px: [0.5, 0.5, 0.5, 1.0].repeat(w * h) };
+            let mut cpu = grey.clone();
+            lumetri(&mut cpu, &e, &cx);
+            let mut op_img = grey;
+            let op = FxOp::eval(&e, &cx, w, h).expect("lumetri op");
+            op.apply(&mut op_img);
+            for (a, b) in cpu.px.iter().zip(&op_img.px) {
+                assert!((a - b).abs() <= 1e-6, "roundness {roundness}: CPU and GPU op disagree");
+            }
+            cpu
+        };
+        let red = |img: &Image, x: usize, y: usize| img.px[(y * w + x) * 4];
+        // 16 px right of and 16 px below the centre (40, 20)
+        let (right, below) = ((56, 20), (40, 36));
+
+        let ellipse = render(0.0);
+        assert!(red(&ellipse, right.0, right.1) > red(&ellipse, below.0, below.1) + 0.01, "0 follows the frame");
+
+        let circle = render(100.0);
+        assert_ne!(circle.px, ellipse.px, "positive roundness changes the vignette");
+        let (r, b) = (red(&circle, right.0, right.1), red(&circle, below.0, below.1));
+        assert!((r - b).abs() < 1e-4, "+100 is a circle: {r} vs {b}");
+        assert!(r < red(&ellipse, right.0, right.1), "+100 darkens the sides more than 0");
+        let half = render(50.0);
+        assert!(red(&half, 70, 20) < red(&ellipse, 70, 20), "+50 darkens the sides more than 0");
+        assert!(red(&half, 70, 20) > red(&circle, 70, 20), "+50 darkens the sides less than +100");
+
+        let oval = render(-100.0);
+        assert!(red(&oval, 79, 20) > red(&ellipse, 79, 20), "negative values widen the oval");
     }
 }

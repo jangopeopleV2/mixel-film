@@ -106,7 +106,8 @@ pub fn poll_meters(app: &mut FilmcraftApp, ui: &egui::Ui) -> HashMap<u64, Vec<[f
             m[1] = (m[1] - 6.0 * dt).max(-90.0);
         }
     }
-    let live = app.playback.playing || app.session.voiceover.recording();
+    // scrubbing plays through the same mixer, so its grains move the meters too
+    let live = app.playback.playing || app.session.voiceover.recording() || app.scrub.is_open();
     if live {
         for (k, p) in fresh {
             let e = st.entry(k).or_default();
@@ -119,6 +120,10 @@ pub fn poll_meters(app: &mut FilmcraftApp, ui: &egui::Ui) -> HashMap<u64, Vec<[f
                 m[1] = m[1].max(l);
             }
         }
+    }
+    // After Stop, levels and peak holds still fall. Keep animating without pointer input until
+    // both reach the floor, then let the idle window sleep (#1062).
+    if live || st.values().flatten().any(|meter| meter.iter().any(|db| db.is_finite() && *db > -90.0)) {
         ui.ctx().request_repaint();
     }
     ui.data_mut(|d| d.insert_temp(id, (frame, st.clone())));
@@ -202,12 +207,15 @@ fn targets(seq: &Sequence, id: TrackId) -> Vec<&Track> {
 
 pub fn track_mixer(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
-    let Some(seq) = app.session.active_sequence().cloned() else {
+    // Keep the immutable project snapshot alive while UI commands mutate the session.
+    // Cloning a sequence here copies every clip and effect on every redraw.
+    let project = app.session.project.clone();
+    let Some(seq) = app.session.state.active_sequence.and_then(|id| project.sequence(id)) else {
         crate::dock::placeholder(ui, rect, &t, tl!("(no sequence)"));
         return;
     };
     let meters = poll_meters(app, ui);
-    let mut cx = Ctx { t, seq: &seq, now: app.session.playhead(), recording: app.session.mixrec.active(), acts: Vec::new() };
+    let mut cx = Ctx { t, seq, now: app.session.playhead(), recording: app.session.mixrec.active(), acts: Vec::new() };
     let footer = Rect::from_min_max(pos2(rect.min.x, rect.max.y - 34.0), rect.max);
     let body = Rect::from_min_max(pos2(rect.min.x, rect.min.y + 2.0), pos2(rect.max.x, footer.min.y));
     // effects / sends disclosure at the left edge
@@ -245,7 +253,7 @@ pub fn track_mixer(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             ui.ctx(),
             |ui| {
                 for id in seq.audio_tracks.iter().chain(&seq.submix_tracks).map(|t| t.id) {
-                    let label = strip_label(&seq, id);
+                    let label = strip_label(seq, id);
                     let name = seq.mix_track(id).map(|t| t.name.clone()).unwrap_or_default();
                     let mut shown = !app.ui.mixer_hidden.contains(&id.0);
                     let r = ui.checkbox(&mut shown, format!("{label}  {name}"));
@@ -883,7 +891,10 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, cx: &mut Ctx)
 /// Volume and Panner). With the keyframe button on, changes add keyframes at the playhead.
 pub fn clip_mixer(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
-    let Some(seq) = app.session.active_sequence().cloned() else {
+    // Keep the immutable project snapshot alive while UI commands mutate the session.
+    // Cloning a sequence here copies every clip and effect on every redraw.
+    let project = app.session.project.clone();
+    let Some(seq) = app.session.state.active_sequence.and_then(|id| project.sequence(id)) else {
         crate::dock::placeholder(ui, rect, &t, tl!("(no sequence)"));
         return;
     };
@@ -1010,8 +1021,23 @@ pub fn clip_mixer(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             let m = meters.get(&tr.id.0).cloned().unwrap_or_default();
             draw_meters(ui, mrect, &m, if m.is_empty() { filmcraft_render::mixer::width_of(tr.channels) } else { m.len() }, &t);
         }
-        small_text(ui, pos2(sr.min.x + 8.0, sr.max.y - 34.0), Align2::LEFT_CENTER, &db_text(vol), 11.5, dimc(t.hot_text));
-        app.auto.add(&format!("{ap}.value"), Rect::from_min_size(pos2(sr.min.x + 4.0, sr.max.y - 42.0), vec2(50.0, 16.0)), &db_text(vol));
+        // dB readout: drag to scrub, click to type a value (clamped to the fader range), like the track mixer
+        let vr = Rect::from_min_size(pos2(sr.min.x + 4.0, sr.max.y - 42.0), vec2(50.0, 16.0));
+        let mut vui = ui.new_child(egui::UiBuilder::new().max_rect(vr));
+        if !active {
+            vui.set_opacity(0.4);
+        }
+        let (vresp, nv) = crate::widgets::hot_number(&mut vui, egui::Id::new((&ap, "value")), vol.max(-96.0), 0.1, (FADER_MIN_DB, FADER_MAX_DB), 1, "", &t);
+        app.auto.add(&format!("{ap}.value"), vresp.rect, &db_text(vol));
+        if let (Some(v), true) = (nv, active) {
+            set(&mut acts, "volume", "level", v, !vresp.dragged() || vresp.drag_started());
+            if !vresp.dragged() {
+                release(&mut acts, "volume");
+            }
+        }
+        if vresp.drag_stopped() {
+            release(&mut acts, "volume");
+        }
         small_text(ui, pos2(sr.min.x + 6.0, sr.max.y - 10.0), Align2::LEFT_CENTER, &label, 12.0, t.text);
         small_text(ui, pos2(sr.min.x + 30.0, sr.max.y - 10.0), Align2::LEFT_CENTER, &tr.name, 12.0, t.text);
     }

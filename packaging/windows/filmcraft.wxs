@@ -11,7 +11,7 @@
       Name="MIXEL Film"
       Manufacturer="MIXEL"
       Version="$(var.Version)"
-      UpgradeCode="31E6FB14-9DBC-41DD-B24B-26B71FB31B62"
+      UpgradeCode="3F40932F-81D8-5FA0-9EAD-B0F9579F139F"
       Scope="perMachine"
       Compressed="yes"
       Language="1033">
@@ -24,8 +24,8 @@
 
     <Icon Id="FilmcraftIcon.ico" SourceFile="$(var.IconPath)" />
     <Property Id="ARPPRODUCTICON" Value="FilmcraftIcon.ico" />
-    <Property Id="ARPURLINFOABOUT" Value="https://getartcraft.com/apps/filmcraft" />
-    <Property Id="ARPURLUPDATEINFO" Value="https://getartcraft.com/apps/filmcraft" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/jangopeopleV2/mixel-film" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/jangopeopleV2/mixel-film" />
     <Property Id="ARPHELPLINK" Value="https://discord.gg/artcraft" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">

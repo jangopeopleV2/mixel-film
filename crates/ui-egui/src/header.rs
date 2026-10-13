@@ -107,7 +107,9 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         _ => (Icon::Moon, tl!("Dark")),
     };
     let tip = format!("{}: {mode}", tl!("Appearance Mode"));
-    if btn(ui, icon, "appearance", &tip, app).clicked() {
+    let appearance = btn(ui, icon, "appearance", &tip, app);
+    appearance.context_menu(|ui| crate::panels::settings::appearance_context_menu(app, ui));
+    if appearance.clicked() {
         crate::panels::settings::cycle_appearance(app, ui.ctx());
     }
     let ws_resp = btn(ui, Icon::Workspaces, "workspaces", tl!("Workspaces"), app);
@@ -147,7 +149,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
 
         if resp.clicked() {
-            crate::links::open(ui.ctx(), crate::links::DISCORD);
+            crate::links::open(app, ui.ctx(), crate::links::DISCORD);
         }
     }
     let popup_id = egui::Id::new("workspaces-popup");

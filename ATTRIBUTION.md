@@ -9,6 +9,10 @@ iconography, images or other Adobe assets; open licences only; every asset attri
 
 | Asset | Author | Source | Licence |
 |---|---|---|---|
+| `crates/ui-egui/src/i18n/id.tsv` | FilmCraft contributors | Original work: clean-room Indonesian interface translations | MIT OR Apache-2.0 |
+| `crates/ui-egui/src/i18n/fr.tsv` | FilmCraft contributors | Original work: clean-room French interface translations | MIT OR Apache-2.0 |
+| `crates/ui-egui/src/i18n/pt-br.tsv` | FilmCraft contributors | Original work: clean-room Brazilian Portuguese interface translations | MIT OR Apache-2.0 |
+| `crates/ui-egui/src/i18n/ru.tsv` | FilmCraft contributors | Original work: clean-room Russian interface translations | MIT OR Apache-2.0 |
 | `crates/ui-egui/src/i18n/uk.tsv` | FilmCraft contributors | Original work: clean-room Ukrainian interface translations | MIT OR Apache-2.0 |
 | `assets/fonts/Inter-Regular.ttf` | The Inter Project Authors | https://github.com/rsms/inter | OFL-1.1 (`assets/fonts/OFL-Inter.txt`) |
 | `assets/fonts/Inter-Medium.ttf` | The Inter Project Authors | https://github.com/rsms/inter | OFL-1.1 (`assets/fonts/OFL-Inter.txt`) |
@@ -101,6 +105,7 @@ is traced or derived from Adobe artwork.
 
 | Asset | Where |
 |---|---|
+| Original MIXEL monogram | `crates/ui-egui/src/brand.rs`: original five-point M by MIXEL contributors, drawn as line segments, MIT OR Apache-2.0; no traced or third-party artwork |
 | UI icons (tools, transport, panels, header) | `crates/ui-egui/src/icons.rs`: vector paths on a 16×16 grid |
 | Source and Program range braces and trim hover cues | `crates/ui-egui/src/panels/monitor.rs` and `source_range.rs`: original generic vector shapes by FilmCraft contributors, MIT OR Apache-2.0; no third-party artwork |
 | Align / distribute / paragraph-alignment glyphs in the graphics panel | `crates/ui-egui/src/panels/graphics.rs` (`align_glyph`): bars and lines drawn with the egui painter |
