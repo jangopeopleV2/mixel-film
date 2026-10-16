@@ -1474,8 +1474,8 @@ pub fn quick_export(app: &mut FilmcraftApp, ctx: &egui::Context, anchor: egui::P
         // a file name goes in the shown folder; a typed or pasted path replaces both
         app.ui.export.quick_path = if v.contains(['/', '\\']) { v } else { std::path::Path::new(&folder).join(v.trim()).to_string_lossy().to_string() };
     }
-    if browse && let Some(p) = app.hooks.pick_save_as.as_mut().and_then(|f| f(format, &[ext], &app.ui.export.quick_path)) {
-        app.ui.export.quick_path = p;
+    if browse {
+        quick_export_browse(app, format, ext);
     }
     if go {
         let p = json!({"preset": app.ui.export.quick_preset, "path": app.ui.export.quick_path});
@@ -1488,6 +1488,25 @@ pub fn quick_export(app: &mut FilmcraftApp, ctx: &egui::Context, anchor: egui::P
     if close || crate::widgets::escape_closes(ctx) || (clicked_elsewhere && !toggled) {
         app.ui.export.quick_open = false;
     }
+}
+
+fn quick_export_browse(app: &mut FilmcraftApp, format: &str, ext: &str) {
+    let project = app.session.project.clone();
+    let sequence = app.session.state.active_sequence;
+    let path = app.ui.export.quick_path.clone();
+    let preset = app.ui.export.quick_preset.clone();
+    let dialog = FileDialog::save_as(format, &[ext], &path);
+    app.pick_ui(dialog, move |app, paths| {
+        let Some(picked) = paths.into_iter().next() else { return };
+        if app.ui.export.quick_open
+            && std::sync::Arc::ptr_eq(&app.session.project, &project)
+            && app.session.state.active_sequence == sequence
+            && app.ui.export.quick_path == path
+            && app.ui.export.quick_preset == preset
+        {
+            app.ui.export.quick_path = picked;
+        }
+    });
 }
 
 /// A left-aligned selectable list row of a fixed width.
@@ -1503,4 +1522,70 @@ fn list_row(ui: &mut egui::Ui, t: &Tokens, selected: bool, text: &str, width: f3
     ui.painter().rect_filled(r, 3.0, bg);
     ui.painter().text(pos2(r.min.x + 6.0, r.center().y), Align2::LEFT_CENTER, text, Tokens::ui(12.5), if selected { Color32::WHITE } else { t.text });
     resp
+}
+
+#[cfg(test)]
+mod picker_tests {
+    use super::*;
+
+    fn browse(app: &mut FilmcraftApp) -> std::sync::mpsc::Sender<Vec<String>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rx = Some(rx);
+        app.hooks.pick_save_as = Some(Box::new(|_, _, _| panic!("Quick Export must use the native sheet runner")));
+        app.hooks.run_dialog = Some(Box::new(move |dialog| {
+            assert!(
+                matches!(dialog, FileDialog::SaveAs { filter, exts, name } if filter == "Waveform Audio" && exts == ["wav"] && name == "/exports/original.wav")
+            );
+            rx.take().unwrap()
+        }));
+        quick_export_browse(app, "Waveform Audio", "wav");
+        assert!(app.native_dialog_open());
+        assert_eq!(app.ui.export.quick_path, "/exports/original.wav");
+        tx
+    }
+
+    fn app() -> FilmcraftApp {
+        let mut app = FilmcraftApp::new(filmcraft_engine::Session::default());
+        app.ui.export.quick_open = true;
+        app.ui.export.quick_path = "/exports/original.wav".into();
+        app.ui.export.quick_preset = "Waveform Audio 48 kHz 16-bit".into();
+        app
+    }
+
+    #[test]
+    fn quick_browse_applies_only_a_later_nonempty_answer() {
+        let mut app = app();
+        let answer = browse(&mut app);
+        answer.send(vec![]).unwrap();
+        app.poll_native_dialog(&egui::Context::default());
+        assert_eq!(app.ui.export.quick_path, "/exports/original.wav");
+        assert!(app.ui.export.quick_open);
+        let answer = browse(&mut app);
+        answer.send(vec!["/exports/selected.wav".into()]).unwrap();
+        assert_eq!(app.ui.export.quick_path, "/exports/original.wav");
+        app.poll_native_dialog(&egui::Context::default());
+        assert_eq!(app.ui.export.quick_path, "/exports/selected.wav");
+        assert!(app.ui.export.quick_open);
+    }
+
+    #[test]
+    fn quick_browse_ignores_closed_popup_newer_path_preset_or_project() {
+        for changed in ["closed", "path", "preset", "project", "sequence"] {
+            let mut app = app();
+            let answer = browse(&mut app);
+            match changed {
+                "closed" => app.ui.export.quick_open = false,
+                "path" => app.ui.export.quick_path = "/exports/newer.wav".into(),
+                "preset" => app.ui.export.quick_preset = "Another preset".into(),
+                "project" => std::sync::Arc::make_mut(&mut app.session.project).name = "Another project".into(),
+                "sequence" => app.session.state.active_sequence = Some(filmcraft_project::ItemId(42)),
+                _ => unreachable!(),
+            }
+            let before = app.ui.export.quick_path.clone();
+            answer.send(vec!["/exports/stale.wav".into()]).unwrap();
+            app.poll_native_dialog(&egui::Context::default());
+            assert_eq!(app.ui.export.quick_path, before, "{changed}");
+            assert!(!app.native_dialog_open());
+        }
+    }
 }

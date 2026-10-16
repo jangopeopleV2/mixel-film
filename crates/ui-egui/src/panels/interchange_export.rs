@@ -9,12 +9,16 @@
 
 use crate::widgets::CenteredDialog as _;
 use serde_json::{Value, json};
+use std::path::Path;
+use std::sync::Arc;
 
 use crate::FilmcraftApp;
 use crate::native_dialogs::FileDialog;
 
 #[derive(Clone, Debug, PartialEq)]
 struct Draft {
+    source: ExportSource,
+    path: Option<String>,
     omf: bool,
     title: String,
     mixdown_video: bool,
@@ -26,6 +30,151 @@ struct Draft {
     trim: bool,
     handles: i64,
     render_effects: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ExportSource {
+    project: Arc<filmcraft_project::Project>,
+    sequence: filmcraft_project::ItemId,
+}
+
+impl PartialEq for ExportSource {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.project, &other.project) && self.sequence == other.sequence
+    }
+}
+
+impl ExportSource {
+    fn current(&self, app: &FilmcraftApp) -> bool {
+        Arc::ptr_eq(&self.project, &app.session.project) && app.session.project.sequence(self.sequence).is_some()
+    }
+}
+
+impl Draft {
+    fn params(&self, path: &str) -> Value {
+        let mut params = json!({
+            "path": path,
+            "sequence": self.source.sequence.0,
+            "breakoutToMono": self.breakout,
+            "audio": self.audio,
+            "audioFormat": self.format,
+            "sampleRate": self.sample_rate,
+            "bitDepth": self.bits,
+            "trimAudio": self.trim && self.audio != "linked",
+            "handles": self.handles,
+            "renderAudioEffects": self.render_effects && self.audio != "linked",
+        });
+        if self.omf {
+            params["title"] = json!(self.title);
+        } else {
+            params["mixdownVideo"] = json!(self.mixdown_video);
+        }
+        params
+    }
+}
+
+/// The UI asks the host for permission; the engine independently rechecks actual native scope.
+/// Keeping this small policy as a dependency lets headless hosts exercise the real continuation.
+#[derive(Clone)]
+struct FolderAccess {
+    required: bool,
+    granted: Arc<dyn Fn(&Path) -> bool + Send + Sync>,
+}
+
+impl FolderAccess {
+    fn native(app: &FilmcraftApp) -> Self {
+        Self {
+            required: crate::macos_mas::enabled() && !app.session.services.export_in_memory(),
+            granted: Arc::new(|path| crate::macos_mas::directory_granted(path)),
+        }
+    }
+}
+
+fn restore(app: &mut FilmcraftApp, ctx: &egui::Context, draft: Draft, message: &str) {
+    app.ui.status = message.to_string();
+    if draft.source.current(app) {
+        ctx.data_mut(|m| m.insert_temp(draft_id(), Some(draft)));
+    }
+}
+
+fn execute_export(app: &mut FilmcraftApp, ctx: &egui::Context, draft: Draft) {
+    if !draft.source.current(app) {
+        app.ui.status = "The project changed while choosing the export destination. Reopen the export settings.".into();
+        return;
+    }
+    let Some(path) = draft.path.as_deref() else { return };
+    let cmd = if draft.omf { "file.exportOmf" } else { "file.exportAaf" };
+    match app.session.execute(cmd, draft.params(path)) {
+        Ok(v) => app.ui.status = tlf!("Exported {path}", path = v["path"].as_str().unwrap_or_default()),
+        Err(e) => restore(app, ctx, draft, &e.to_string()),
+    }
+}
+
+fn after_save(app: &mut FilmcraftApp, ctx: egui::Context, draft: Draft, access: FolderAccess) {
+    if !draft.source.current(app) {
+        app.ui.status = "The project changed while choosing the export destination. Reopen the export settings.".into();
+        return;
+    }
+    let Some(path) = draft.path.as_deref() else { return };
+    let folder = if access.required { filmcraft_engine::aaf_omf::companion_folder(path, &draft.params(path), draft.omf) } else { Ok(None) };
+    let folder = match folder {
+        Ok(folder) => folder,
+        Err(e) => return restore(app, &ctx, draft, &e.to_string()),
+    };
+    let Some(parent) = folder.filter(|folder| !(access.granted)(folder)) else {
+        return execute_export(app, &ctx, draft);
+    };
+    let dialog = FileDialog::Folder { at: Some(parent.to_string_lossy().into_owned()) };
+    if app.native_dialog_open() {
+        return restore(app, &ctx, draft, tl!("A file dialog is already open"));
+    }
+    if (crate::macos_mas::enabled() && app.hooks.run_dialog.is_none()) || !dialog.available(&app.hooks) {
+        return restore(app, &ctx, draft, tl!("The native file dialog service is unavailable. Reopen MIXEL Film and try again."));
+    }
+    app.ui.status = filmcraft_engine::aaf_omf::COMPANION_FOLDER_REQUIRED.into();
+    app.pick_ui(dialog, move |app, paths| {
+        let message = filmcraft_engine::aaf_omf::COMPANION_FOLDER_REQUIRED;
+        let Some(folder) = paths.first() else { return restore(app, &ctx, draft, message) };
+        let Some(path) = draft.path.as_deref() else { return };
+        // A moved bookmark can change both the saved filename and its containing folder.
+        let resolved = crate::macos_mas::resolve(path);
+        let selected = crate::macos_mas::resolve(folder);
+        let (path, selected) = match (resolved, selected) {
+            (Ok(path), Ok(selected)) => (path, selected),
+            (Err(e), _) | (_, Err(e)) => return restore(app, &ctx, draft, &e),
+        };
+        let valid = selected.is_absolute()
+            && !selected.components().any(|c| matches!(c, std::path::Component::ParentDir))
+            && path.parent().is_some_and(|parent| parent.starts_with(&selected) && (access.granted)(parent));
+        if !valid {
+            return restore(app, &ctx, draft, message);
+        }
+        let mut draft = draft;
+        draft.path = Some(path.to_string_lossy().into_owned());
+        execute_export(app, &ctx, draft);
+    });
+}
+
+fn choose_destination(app: &mut FilmcraftApp, ctx: egui::Context, draft: Draft, access: FolderAccess) {
+    if app.native_dialog_open() {
+        return restore(app, &ctx, draft, tl!("A file dialog is already open"));
+    }
+    if draft.path.is_some() {
+        return after_save(app, ctx, draft, access);
+    }
+    let (ext, filter) = if draft.omf { ("omf", "OMF") } else { ("aaf", "AAF") };
+    let stem = if draft.title.is_empty() { "Sequence".to_string() } else { draft.title.replace(['/', '\\', ':'], "_") };
+    let dialog = FileDialog::save_as(filter, &[ext], &format!("{stem}.{ext}"));
+    if !(crate::macos_mas::enabled() && app.hooks.run_dialog.is_none()) && dialog.available(&app.hooks) {
+        app.pick_ui(dialog, move |app, paths| {
+            let Some(path) = paths.into_iter().next() else { return };
+            let mut draft = draft;
+            draft.path = Some(path);
+            after_save(app, ctx, draft, access);
+        });
+    } else {
+        restore(app, &ctx, draft, "no save dialog available: run the command with a `path`");
+    }
 }
 
 fn draft_id() -> egui::Id {
@@ -40,7 +189,10 @@ pub fn open(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str) -> Result<Val
     let seq = app.session.state.active_sequence.and_then(|s| app.session.project.item(s));
     let title = seq.map(|i| i.name.clone()).unwrap_or_default();
     let sr = app.session.active_sequence().map(|q| q.settings.sample_rate).filter(|r| RATES.contains(r)).unwrap_or(48_000);
+    let sequence = app.session.state.active_sequence.ok_or_else(|| filmcraft_engine::EngineError::NoSequence.to_string())?;
     let d = Draft {
+        source: ExportSource { project: app.session.project.clone(), sequence },
+        path: None,
         omf,
         title,
         mixdown_video: false,
@@ -175,41 +327,15 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
         close = true;
     }
     if apply {
-        close = true;
-        let (ext, filter) = if d.omf { ("omf", "OMF") } else { ("aaf", "AAF") };
-        let stem = if d.title.is_empty() { "Sequence".to_string() } else { d.title.replace(['/', '\\', ':'], "_") };
-        let suggested = format!("{stem}.{ext}");
-        let dialog = FileDialog::save_as(filter, &[ext], &suggested);
-        if dialog.available(&app.hooks) {
-            // the dialog closes now: the export takes its settings as they are
-            let d = d.clone();
-            app.pick_ui(dialog, move |app, paths| {
-                let Some(path) = paths.into_iter().next() else { return };
-                let mut params = json!({
-                    "path": path,
-                    "breakoutToMono": d.breakout,
-                    "audio": d.audio,
-                    "audioFormat": d.format,
-                    "sampleRate": d.sample_rate,
-                    "bitDepth": d.bits,
-                    "trimAudio": d.trim && d.audio != "linked",
-                    "handles": d.handles,
-                    "renderAudioEffects": d.render_effects && d.audio != "linked",
-                });
-                if d.omf {
-                    params["title"] = json!(d.title);
-                } else {
-                    params["mixdownVideo"] = json!(d.mixdown_video);
-                }
-                let cmd = if d.omf { "file.exportOmf" } else { "file.exportAaf" };
-                match app.session.execute(cmd, params) {
-                    Ok(v) => app.ui.status = tlf!("Exported {path}", path = v["path"].as_str().unwrap_or_default()),
-                    Err(e) => app.ui.status = e.to_string(),
-                }
-            });
-        } else {
-            app.ui.status = "no save dialog available: run the command with a `path`".into();
-        }
+        // Close before starting the continuation: a retry must not overwrite restored settings.
+        ctx.data_mut(|m| m.insert_temp::<Option<Draft>>(draft_id(), None));
+        let access = FolderAccess::native(app);
+        choose_destination(app, ctx.clone(), d, access);
+        return;
     }
     ctx.data_mut(|m| m.insert_temp(draft_id(), if close { None } else { Some(d) }));
 }
+
+#[cfg(test)]
+#[path = "interchange_export_permissions_tests.rs"]
+mod macos_mas_output_tests;

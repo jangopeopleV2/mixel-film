@@ -4371,6 +4371,9 @@ fn recover(s: &mut Session, id: Option<&str>) -> Result<Value> {
 
 /// Where auto-saves of the current project go.
 fn auto_save_dir(s: &Session) -> std::path::PathBuf {
+    if crate::macos_mas::enabled() {
+        return crate::autosave::sandbox_auto_save_dir(s.path.as_deref()).unwrap_or_else(|| std::path::PathBuf::from("/dev/null/MIXEL Film State"));
+    }
     if let Some(d) = s.project.settings.scratch.auto_save.as_deref().filter(|d| !d.is_empty() && s.path.is_some()) {
         return std::path::PathBuf::from(d);
     }

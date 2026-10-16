@@ -24,6 +24,7 @@ pub mod graphics;
 pub mod interchange;
 pub mod keyboard;
 mod keyframe_move;
+pub mod macos_mas;
 mod marker_export;
 pub mod masks;
 pub mod media_browser;
@@ -74,6 +75,16 @@ pub use media_pool::MediaPool;
 /// The OS temp folder; `/tmp` on wasm32, where `std::env::temp_dir()` panics ("no filesystem on
 /// this platform"). Use this instead of `std::env::temp_dir()` in any code the web build runs.
 pub fn temp_dir() -> std::path::PathBuf {
+    if crate::macos_mas::enabled() {
+        if let Some(path) = crate::macos_mas::temporary_dir("MIXEL Film") {
+            // Callers report any subsequent write failure through their normal I/O result.
+            let _ = std::fs::create_dir_all(&path);
+            return path;
+        }
+        // No fall back to the real user TMPDIR from an unsigned App Store binary.
+        // /dev/null cannot contain files: every scratch operation fails with an I/O error.
+        return std::path::PathBuf::from("/dev/null/MIXEL Film Temporary");
+    }
     if cfg!(target_arch = "wasm32") { std::path::PathBuf::from("/tmp") } else { std::env::temp_dir() }
 }
 
@@ -152,27 +163,46 @@ pub trait Services: Send + Sync {
 pub struct FsServices;
 impl Services for FsServices {
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        let path = crate::macos_mas::resolve(path).map_err(std::io::Error::other)?;
         std::fs::read(path)
     }
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
-        // Atomic + durable: temp file in the same directory, fsync, rename, fsync the directory.
-        filmcraft_format::atomic_write(std::path::Path::new(path), data)
+        #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+        {
+            let path = crate::macos_mas::resolve(path).map_err(std::io::Error::other)?;
+            let actual = filmcraft_format::atomic::atomic_write_path(&path, data)?;
+            // after_write queues a warning; successful publication stays successful.
+            let _ = crate::macos_mas::after_write(actual);
+            Ok(())
+        }
+        #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+        {
+            // Atomic + durable: temp file in the same directory, fsync, rename, fsync the directory.
+            filmcraft_format::atomic_write(std::path::Path::new(path), data)?;
+            crate::macos_mas::after_write(path).map_err(std::io::Error::other)
+        }
     }
     fn file_size(&self, path: &str) -> std::io::Result<u64> {
-        let m = std::fs::metadata(path)?;
-        if m.is_file() { Ok(m.len()) } else { Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("{path} is not a file"))) }
+        let path = crate::macos_mas::resolve(path).map_err(std::io::Error::other)?;
+        let m = std::fs::metadata(&path)?;
+        if m.is_file() { Ok(m.len()) } else { Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("{} is not a file", path.display()))) }
     }
     fn list_dir(&self, dir: &str) -> Option<std::io::Result<Vec<String>>> {
         let dir = if dir.is_empty() { "." } else { dir };
         Some(std::fs::read_dir(dir).map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect()))
     }
     fn file_loader(&self) -> Option<filmcraft_media::sequence::FrameLoader> {
-        Some(std::sync::Arc::new(|p: &str| std::fs::read(p)))
+        Some(std::sync::Arc::new(|p: &str| crate::macos_mas::resolve(p).map_err(std::io::Error::other).and_then(std::fs::read)))
     }
     /// Media are read in place from the open file: a clip costs its index, not its size.
     #[cfg(any(unix, windows))]
     fn reader(&self, path: &str) -> Option<std::io::Result<filmcraft_media::SharedReader>> {
-        Some(filmcraft_media::reader::FileReader::open(std::path::Path::new(path)).map(|r| std::sync::Arc::new(r) as filmcraft_media::SharedReader))
+        Some(
+            crate::macos_mas::resolve(path)
+                .map_err(std::io::Error::other)
+                .and_then(|path| filmcraft_media::reader::FileReader::open(&path))
+                .map(|r| std::sync::Arc::new(r) as filmcraft_media::SharedReader),
+        )
     }
     fn list_entries(&self, dir: &str) -> Option<std::io::Result<Vec<media_browser::DirEntry>>> {
         Some(media_browser::std_list_entries(dir))
@@ -181,10 +211,14 @@ impl Services for FsServices {
         media_browser::std_volumes()
     }
     fn home_dir(&self) -> Option<String> {
+        if crate::macos_mas::enabled() {
+            return crate::macos_mas::container_dir("MIXEL Film").map(|p| p.to_string_lossy().into_owned());
+        }
         media_browser::std_home_dir()
     }
     fn read_range(&self, path: &str, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
         use std::io::{Read, Seek, SeekFrom};
+        let path = crate::macos_mas::resolve(path).map_err(std::io::Error::other)?;
         let mut f = std::fs::File::open(path)?;
         f.seek(SeekFrom::Start(offset))?;
         let mut out = Vec::with_capacity(len);
@@ -690,6 +724,8 @@ impl Session {
 
     /// Run a command by id.
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
+        let mut params = params;
+        crate::macos_mas::resolve_params(&mut params).map_err(EngineError::Other)?;
         let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
         if self.exec_depth == 0 && spec.journal && self.trim_play.active() {
             self.settle_trim_playback(id);

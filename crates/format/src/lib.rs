@@ -44,6 +44,8 @@
 
 pub mod atomic;
 pub mod autosave;
+#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+pub mod macos_atomic;
 
 use filmcraft_project::{Project, ProjectView};
 use serde::{Deserialize, Serialize};

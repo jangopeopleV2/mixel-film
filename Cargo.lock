@@ -232,6 +232,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "apple-scoped-bookmarks"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c2292ed2eca1af90a2c39dc660b8e061c12effb3d3f092f6f9edde225c8033c"
+dependencies = [
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "arboard"
 version = "3.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1902,6 +1912,7 @@ dependencies = [
 name = "filmcraft-engine"
 version = "0.7.2"
 dependencies = [
+ "apple-scoped-bookmarks",
  "filmcraft-audio-dsp",
  "filmcraft-captions",
  "filmcraft-codecs",
@@ -1926,6 +1937,7 @@ dependencies = [
  "filmcraft-tts",
  "image",
  "log",
+ "objc2-foundation 0.3.2",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -1956,6 +1968,7 @@ dependencies = [
  "filmcraft-text",
  "filmcraft-time",
  "image",
+ "objc2-foundation 0.3.2",
  "rayon",
  "serde",
  "serde_json",
@@ -1980,6 +1993,7 @@ dependencies = [
  "filmcraft-project",
  "filmcraft-time",
  "log",
+ "objc2-foundation 0.3.2",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -5167,9 +5181,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "log",
  "once_cell",
@@ -5979,7 +5993,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.5",
  "windows-sys 0.61.2",

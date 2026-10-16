@@ -224,10 +224,49 @@ fn safe_name(s: &str) -> String {
     if n.is_empty() { "audio".into() } else { n }
 }
 
-fn ensure_dir(s: &Session, dir: &str) {
+fn ensure_dir(s: &Session, dir: &str) -> Result<()> {
     if !s.services.export_in_memory() && !dir.is_empty() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir).map_err(|e| EngineError::Other(format!("{dir}: {e}")))?;
     }
+    Ok(())
+}
+
+/// Separate essence, rendered linked essence and video mixdowns create companion files.
+/// A plain linked AAF and embedded audio keep the single-file Save-panel workflow.
+pub fn writes_companion_files(p: &Value, omf: bool) -> bool {
+    let audio = str_p(p, "audio").unwrap_or("embedded");
+    matches!(audio, "separate" | "separateAudio")
+        || (!omf
+            && (bool_p(p, "mixdownVideo").unwrap_or(false)
+                || (matches!(audio, "linked" | "link") && (bool_p(p, "trimAudio").unwrap_or(false) || bool_p(p, "renderAudioEffects").unwrap_or(false)))))
+}
+
+/// The selected containing folder must cover the document and its derived media subfolder.
+/// This only resolves paths; it never manufactures a directory bookmark from a file choice.
+pub fn companion_folder(path: &str, p: &Value, omf: bool) -> Result<Option<std::path::PathBuf>> {
+    if !writes_companion_files(p, omf) {
+        return Ok(None);
+    }
+    let path = crate::macos_mas::resolve(path).map_err(EngineError::Other)?;
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).ok_or_else(|| EngineError::Other(COMPANION_FOLDER_REQUIRED.into()))?;
+    Ok(Some(parent.to_path_buf()))
+}
+
+pub const COMPANION_FOLDER_REQUIRED: &str = "This export writes several files. Choose its destination folder in the native folder picker before exporting";
+
+fn require_companion_folder(folder: Option<&std::path::Path>, granted: impl FnOnce(&std::path::Path) -> bool) -> Result<()> {
+    if folder.is_some_and(|folder| !granted(folder)) {
+        return Err(EngineError::Other(COMPANION_FOLDER_REQUIRED.into()));
+    }
+    Ok(())
+}
+
+fn preflight_companion_files(s: &Session, path: &str, p: &Value, omf: bool) -> Result<()> {
+    if crate::macos_mas::enabled() && !s.services.export_in_memory() {
+        let folder = companion_folder(path, p, omf)?;
+        require_companion_folder(folder.as_deref(), |path| crate::macos_mas::directory_granted(path))?;
+    }
+    Ok(())
 }
 
 fn check_linked_streams(s: &Session, seq: ItemId, plan: &AudioPlan) -> Result<()> {
@@ -364,6 +403,7 @@ fn mixdown(s: &Session, seq: ItemId, path: &str) -> Result<MixdownVideo> {
         let services = s.services.clone();
         settings.sink = Some(filmcraft_export::OutputSink(Arc::new(move |p: &str, d: Vec<u8>| services.write_file(p, &d))));
     }
+    crate::export_tools::prepare_native_export(&mut settings)?;
     let project = s.project.clone();
     let provider = s.media.full_res_provider(project.clone(), s.services.clone());
     filmcraft_export::export(&project, seq, &settings, &provider, &Default::default()).map_err(|e| EngineError::Other(format!("video mixdown: {e}")))?;
@@ -388,15 +428,17 @@ fn join(dir: &str, name: &str) -> String {
 /// `file.exportAaf`
 pub fn export_aaf(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "file.exportAaf";
-    let path = str_p(p, "path").ok_or_else(|| bad(cmd, "need `path`"))?.to_string();
+    let path = crate::macos_mas::resolve(str_p(p, "path").ok_or_else(|| bad(cmd, "need `path`"))?).map_err(EngineError::Other)?.to_string_lossy().into_owned();
     let seq = crate::export_tools::sequence_param(s, p, cmd)?;
     let plan = plan_from(s, p, seq, cmd, false)?;
     check_linked_streams(s, seq, &plan)?;
+    // Permission refusal precedes directory creation, audio rendering and every write.
+    preflight_companion_files(s, &path, p, false)?;
     let (dir, stem) = split(&path);
     let media_dir = join(&dir, &format!("{stem} Media"));
     let mut files = Vec::new();
-    if plan.mode != AudioMode::Embedded || bool_p(p, "mixdownVideo").unwrap_or(false) {
-        ensure_dir(s, &media_dir);
+    if writes_companion_files(p, false) {
+        ensure_dir(s, &media_dir)?;
     }
     let (essence, written) = prepare_audio(s, seq, &plan, &media_dir)?;
     files.extend(written);
@@ -421,13 +463,14 @@ pub fn export_aaf(s: &mut Session, p: &Value) -> Result<Value> {
 /// `file.exportOmf`
 pub fn export_omf(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "file.exportOmf";
-    let path = str_p(p, "path").ok_or_else(|| bad(cmd, "need `path`"))?.to_string();
+    let path = crate::macos_mas::resolve(str_p(p, "path").ok_or_else(|| bad(cmd, "need `path`"))?).map_err(EngineError::Other)?.to_string_lossy().into_owned();
     let seq = crate::export_tools::sequence_param(s, p, cmd)?;
     let plan = plan_from(s, p, seq, cmd, true)?;
+    preflight_companion_files(s, &path, p, true)?;
     let (dir, stem) = split(&path);
     let media_dir = join(&dir, &format!("{stem} Audio Files"));
     if plan.mode == AudioMode::Separate {
-        ensure_dir(s, &media_dir);
+        ensure_dir(s, &media_dir)?;
     }
     let (essence, files) = prepare_audio(s, seq, &plan, &media_dir)?;
     let opts = filmcraft_interchange::omf::OmfOptions {
@@ -449,4 +492,131 @@ pub fn import_document(s: &mut Session, p: &Value, cmd: &str) -> Result<Value> {
     let format = crate::interchange::detect(&path, &bytes).filter(|f| matches!(f, filmcraft_interchange::Format::Aaf | filmcraft_interchange::Format::Omf));
     let format = format.ok_or_else(|| bad(cmd, format!("{path} is not an AAF or OMF file")))?;
     crate::interchange::import(s, &path, &bytes, format)
+}
+
+#[cfg(test)]
+mod macos_mas_companion_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::path::Path;
+
+    #[test]
+    fn embedded_and_plain_linked_are_single_file_exports() {
+        for audio in ["embedded", "embed", "encapsulate", "linked", "link"] {
+            assert!(!writes_companion_files(&json!({"audio": audio}), false), "{audio}");
+        }
+        assert!(!writes_companion_files(&json!({}), false));
+        assert!(!writes_companion_files(&json!({"audio": "embedded", "mixdownVideo": true}), true), "OMF has no video mixdown");
+    }
+
+    #[test]
+    fn separate_aliases_rendered_links_and_video_require_companion_scope() {
+        for audio in ["separate", "separateAudio"] {
+            for omf in [false, true] {
+                assert!(writes_companion_files(&json!({"audio": audio}), omf));
+            }
+        }
+        for audio in ["linked", "link"] {
+            for option in ["trimAudio", "renderAudioEffects"] {
+                let mut params = json!({"audio": audio});
+                params[option] = json!(true);
+                assert!(writes_companion_files(&params, false));
+            }
+        }
+        assert!(writes_companion_files(&json!({"mixdownVideo": true}), false));
+    }
+
+    #[test]
+    fn companion_destination_is_the_documents_containing_folder() {
+        let parent = std::env::temp_dir().join("mixel-film-companion-policy");
+        let path = parent.join("named cut.aaf").to_string_lossy().into_owned();
+        assert_eq!(companion_folder(&path, &json!({"audio": "separate"}), false).unwrap(), Some(parent));
+        assert!(companion_folder(&path, &json!({"audio": "linked"}), false).unwrap().is_none());
+        assert!(companion_folder("cut.aaf", &json!({"audio": "separate"}), false).is_err());
+    }
+
+    #[test]
+    fn file_only_or_wrong_folder_scope_is_refused_before_work() {
+        let folder = std::env::temp_dir().join("mixel-film-companion-destination");
+        let calls = Cell::new(0);
+        let error = require_companion_folder(Some(&folder), |_| {
+            calls.set(calls.get() + 1);
+            false
+        })
+        .unwrap_err();
+        assert_eq!(calls.get(), 1);
+        assert!(error.to_string().contains("destination folder"));
+        let unrelated = std::env::temp_dir().join("mixel-film-companion-unrelated");
+        assert!(require_companion_folder(Some(&folder), |p| p.starts_with(&unrelated)).is_err());
+    }
+
+    #[test]
+    fn an_explicit_ancestor_grant_covers_all_companions_but_single_files_need_no_query() {
+        let chosen = std::env::temp_dir().join("mixel-film-companion-selected");
+        let destination = chosen.join("exports");
+        require_companion_folder(Some(&destination), |p| p.starts_with(&chosen)).unwrap();
+        require_companion_folder(None, |_: &Path| panic!("a single file must not query directory permission")).unwrap();
+    }
+
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    mod native {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct NativeWrites(AtomicUsize);
+
+        impl crate::Services for NativeWrites {
+            fn read_file(&self, _: &str) -> std::io::Result<Vec<u8>> {
+                Err(std::io::ErrorKind::NotFound.into())
+            }
+            fn write_file(&self, _: &str, _: &[u8]) -> std::io::Result<()> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        fn destination() -> std::path::PathBuf {
+            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+            std::env::temp_dir().join(format!("mixel-phase1-film-companion-{}-{stamp}", std::process::id()))
+        }
+
+        #[test]
+        fn commands_refuse_ungranted_companions_before_mkdir_or_service_write() {
+            for (command, options) in [
+                ("file.exportAaf", json!({"audio": "separate"})),
+                ("file.exportOmf", json!({"audio": "separate"})),
+                ("file.exportAaf", json!({"audio": "linked", "trimAudio": true})),
+                ("file.exportAaf", json!({"mixdownVideo": true})),
+            ] {
+                let services = Arc::new(NativeWrites::default());
+                let mut session = Session::new(services.clone());
+                session.execute("file.newSequence", json!({"audio": 1, "video": 1})).unwrap();
+                let parent = destination();
+                assert!(!parent.exists());
+                assert!(!crate::macos_mas::directory_granted(&parent));
+                let mut params = options;
+                params["path"] = json!(parent.join("cut.aaf"));
+                let error = session.execute(command, params).unwrap_err();
+                assert!(error.to_string().contains("destination folder"), "{error}");
+                assert_eq!(services.0.load(Ordering::SeqCst), 0);
+                assert!(!parent.exists(), "no output directory may be created before consent");
+            }
+        }
+
+        #[test]
+        fn plain_linked_and_embedded_exports_never_create_a_companion_directory() {
+            for (command, audio) in [("file.exportAaf", "linked"), ("file.exportAaf", "embedded"), ("file.exportOmf", "embedded")] {
+                let services = Arc::new(NativeWrites::default());
+                let mut session = Session::new(services.clone());
+                session.execute("file.newSequence", json!({"audio": 1, "video": 1})).unwrap();
+                let parent = destination();
+                assert!(!crate::macos_mas::directory_granted(&parent));
+                let result = session.execute(command, json!({"path": parent.join("cut.aaf"), "audio": audio})).unwrap();
+                assert!(result["mediaFiles"].as_array().unwrap().is_empty());
+                assert_eq!(services.0.load(Ordering::SeqCst), 1);
+                assert!(!parent.exists());
+            }
+        }
+    }
 }

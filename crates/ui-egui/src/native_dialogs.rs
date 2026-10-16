@@ -7,7 +7,8 @@
 //! dialog and answers on a channel; the frame loop keeps running, and the continuation runs on the
 //! frame the answer arrives ([`FilmcraftApp::poll_native_dialog`]). Without it the host's
 //! synchronous pickers (`pick_files`, `pick_save_as`, …) are called and the continuation runs at
-//! once, as before: headless tests, the control channel's stand-ins and other hosts are unchanged.
+//! once, as before. The macOS App Store build requires the sheet runner and fails with an
+//! actionable error if it is unavailable; it never falls back to a synchronous AppKit panel.
 //!
 //! Two entry points:
 //! - [`FilmcraftApp::pick`] for menu and control-channel commands: with the synchronous pickers
@@ -118,12 +119,43 @@ impl FilmcraftApp {
     /// later frame; otherwise `then` runs now and its result is returned. While a dialog is open
     /// another one is refused.
     pub fn pick(&mut self, dialog: FileDialog, then: impl FnOnce(&mut FilmcraftApp, Vec<String>) -> Result<Value, String> + 'static) -> Result<Value, String> {
+        self.pick_boxed(dialog, Box::new(then))
+    }
+
+    // Erase the callback type before chaining another picker. Recursing through
+    // generic `pick` would instantiate a new nested closure type without bound.
+    fn pick_boxed(&mut self, dialog: FileDialog, then: Continuation) -> Result<Value, String> {
         if self.native_dialog.is_some() {
             return Err(tl!("A file dialog is already open").into());
         }
+        let needs_project_folder = crate::macos_mas::enabled() && matches!(&dialog, FileDialog::OpenProject);
+        let then: Continuation = if needs_project_folder {
+            Box::new(move |app, paths| {
+                let Some(path) = paths.first().map(std::path::PathBuf::from) else { return then(app, paths) };
+                let parent = path.parent().ok_or("The project has no containing folder")?.to_path_buf();
+                if crate::macos_mas::directory_granted(&parent) {
+                    return then(app, paths);
+                }
+                app.pick_boxed(
+                    FileDialog::Folder { at: Some(parent.to_string_lossy().into_owned()) },
+                    Box::new(move |app, folders| {
+                        let Some(folder) = folders.first().map(std::path::PathBuf::from) else { return Ok(Value::Null) };
+                        if !path.starts_with(&folder) {
+                            return Err("Choose the project folder (or one of its parents) to access its linked media".into());
+                        }
+                        then(app, paths)
+                    }),
+                )
+            })
+        } else {
+            then
+        };
         if let Some(run) = self.hooks.run_dialog.as_mut() {
-            self.native_dialog = Some(PendingDialog { answer: run(dialog), then: Box::new(then) });
+            self.native_dialog = Some(PendingDialog { answer: run(dialog), then });
             return Ok(json!({"dialog": "open"}));
+        }
+        if crate::macos_mas::enabled() {
+            return Err(tl!("The native file dialog service is unavailable. Reopen MIXEL Film and try again.").into());
         }
         let paths = dialog.run_now(&mut self.hooks);
         then(self, paths)
@@ -136,6 +168,10 @@ impl FilmcraftApp {
     pub fn pick_ui(&mut self, dialog: FileDialog, then: impl FnOnce(&mut FilmcraftApp, Vec<String>) + 'static) {
         if self.native_dialog.is_some() {
             self.ui.status = tl!("A file dialog is already open").into();
+            return;
+        }
+        if crate::macos_mas::enabled() && self.hooks.run_dialog.is_none() {
+            self.ui.status = tl!("The native file dialog service is unavailable. Reopen MIXEL Film and try again.").into();
             return;
         }
         let answer = match self.hooks.run_dialog.as_mut() {
@@ -177,5 +213,85 @@ impl FilmcraftApp {
             self.ui.status = e;
         }
         ctx.request_repaint();
+    }
+}
+
+#[cfg(all(test, target_os = "macos", feature = "mac-app-store"))]
+mod mas_tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+    use std::rc::Rc;
+    use std::sync::mpsc::channel;
+
+    #[test]
+    fn project_open_waits_for_explicit_containing_folder_before_continuation() {
+        let mut app = FilmcraftApp::new(filmcraft_engine::Session::default());
+        let (project_tx, project_rx) = channel();
+        let (folder_tx, folder_rx) = channel();
+        let mut answers = VecDeque::from([project_rx, folder_rx]);
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let observed = requests.clone();
+        app.hooks.run_dialog = Some(Box::new(move |dialog| {
+            observed.borrow_mut().push(dialog);
+            answers.pop_front().expect("Only the project and containing-folder sheets may open")
+        }));
+        let calls = Rc::new(Cell::new(0));
+        let completed = calls.clone();
+        app.pick(FileDialog::OpenProject, move |_, paths| {
+            assert_eq!(paths, ["/mixel-film-native-sheet-fixture/edited.fcproj"]);
+            completed.set(completed.get() + 1);
+            Ok(Value::Null)
+        })
+        .unwrap();
+        assert!(matches!(requests.borrow().as_slice(), [FileDialog::OpenProject]));
+        project_tx.send(vec!["/mixel-film-native-sheet-fixture/edited.fcproj".into()]).unwrap();
+        let ctx = egui::Context::default();
+        app.poll_native_dialog(&ctx);
+        assert_eq!(calls.get(), 0);
+        assert!(app.native_dialog_open());
+        assert!(
+            matches!(requests.borrow().as_slice(), [FileDialog::OpenProject, FileDialog::Folder { at: Some(parent) }] if parent == "/mixel-film-native-sheet-fixture")
+        );
+        folder_tx.send(vec!["/mixel-film-native-sheet-fixture".into()]).unwrap();
+        app.poll_native_dialog(&ctx);
+        app.poll_native_dialog(&ctx);
+        assert_eq!(calls.get(), 1);
+        assert!(!app.native_dialog_open());
+    }
+
+    #[test]
+    fn project_folder_cancel_or_unrelated_folder_never_opens_project() {
+        for folder in [Vec::new(), vec!["/mixel-film-unrelated-sheet-fixture".into()]] {
+            let mut app = FilmcraftApp::new(filmcraft_engine::Session::default());
+            let (project_tx, project_rx) = channel();
+            let (folder_tx, folder_rx) = channel();
+            let mut answers = VecDeque::from([project_rx, folder_rx]);
+            app.hooks.run_dialog = Some(Box::new(move |_| answers.pop_front().expect("Unexpected third sheet")));
+            app.pick(FileDialog::OpenProject, |_, _| panic!("The containing folder was not selected")).unwrap();
+            let ctx = egui::Context::default();
+            project_tx.send(vec!["/mixel-film-native-sheet-fixture/edited.fcproj".into()]).unwrap();
+            app.poll_native_dialog(&ctx);
+            assert!(app.native_dialog_open());
+            let unrelated = !folder.is_empty();
+            folder_tx.send(folder).unwrap();
+            app.poll_native_dialog(&ctx);
+            assert!(!app.native_dialog_open());
+            if unrelated {
+                assert!(app.ui.status.contains("Choose the project folder"));
+            }
+        }
+    }
+
+    #[test]
+    fn missing_sheet_runner_never_calls_synchronous_pickers_or_continuations() {
+        let mut app = FilmcraftApp::new(filmcraft_engine::Session::default());
+        app.hooks.pick_save_as = Some(Box::new(|_, _, _| panic!("MAS must not fall back to a blocking AppKit panel")));
+        let result = app.pick(FileDialog::save_as("Preset", &["json"], "Preset.json"), |_, _| panic!("No native answer arrived"));
+        assert!(result.unwrap_err().contains("native file dialog service is unavailable"));
+        assert!(!app.native_dialog_open());
+        app.pick_ui(FileDialog::save_as("Preset", &["json"], "Preset.json"), |_, _| panic!("No native answer arrived"));
+        assert!(app.ui.status.contains("native file dialog service is unavailable"));
+        assert!(!app.native_dialog_open());
     }
 }

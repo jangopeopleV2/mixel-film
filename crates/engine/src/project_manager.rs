@@ -82,6 +82,18 @@ struct Work {
 /// Plan, estimate and (unless `dryRun`) run the Project Manager.
 pub fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let dest = str_p(p, "destination").ok_or_else(|| bad("file.projectManager", "need `destination`"))?.to_string();
+    let dest = if crate::macos_mas::enabled() {
+        let path = crate::macos_mas::resolve(&dest).map_err(|e| bad("file.projectManager", e))?;
+        if !bool_p(p, "dryRun").unwrap_or(false) && !crate::macos_mas::directory_granted(&path) {
+            return Err(bad(
+                "file.projectManager",
+                "Project collection writes a folder of media and project files. Choose the destination folder in the native folder picker first",
+            ));
+        }
+        path.to_string_lossy().into_owned()
+    } else {
+        dest
+    };
     let consolidate = match str_p(p, "mode").unwrap_or("collect") {
         "collect" => false,
         "consolidate" | "transcode" => true,
@@ -313,6 +325,9 @@ fn execute(
         bytes += copy_dir(&from, &to).map_err(|e| format!("copying previews: {e}"))?;
     }
     let data = filmcraft_format::encode(&proj, false);
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    services.write_file(project_path, &data).map_err(|e| format!("{project_path}: {e}"))?;
+    #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
     filmcraft_format::atomic_write(Path::new(project_path), &data).map_err(|e| format!("{project_path}: {e}"))?;
     prog.done.fetch_add(1, Ordering::Relaxed);
     Ok(bytes + data.len() as u64)

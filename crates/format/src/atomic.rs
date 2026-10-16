@@ -1,14 +1,25 @@
 //! Crash-safe file replacement.
+//! The App Store backend uses Foundation's private same-volume replacement staging.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+#[cfg(any(test, not(all(target_os = "macos", feature = "mac-app-store"))))]
+use std::fs;
+#[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+use std::fs::{File, OpenOptions};
+use std::io;
+#[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+use std::io::Write;
+use std::path::Path;
+#[cfg(any(test, not(all(target_os = "macos", feature = "mac-app-store"))))]
+use std::path::PathBuf;
+#[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The temp file a save of `path` goes through (same directory, so the rename never crosses file
 /// systems). Hidden, and unique per process and call.
+#[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
 fn temp_path(path: &Path) -> PathBuf {
     let dir = parent_dir(path);
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "project".into());
@@ -16,6 +27,7 @@ fn temp_path(path: &Path) -> PathBuf {
     dir.join(format!(".{name}.{}-{n}.tmp", std::process::id()))
 }
 
+#[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
 fn parent_dir(path: &Path) -> PathBuf {
     match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
@@ -28,6 +40,22 @@ fn parent_dir(path: &Path) -> PathBuf {
 /// `fsync` the directory so the rename itself survives a power cut. If anything fails the temp file
 /// is removed and `path` is untouched.
 pub fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    {
+        atomic_write_path(path, data).map(|_| ())
+    }
+    #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+    atomic_write_native(path, data)
+}
+
+/// App Store atomic publication, returning Foundation's actual committed path.
+#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+pub fn atomic_write_path(path: &Path, data: &[u8]) -> io::Result<std::path::PathBuf> {
+    crate::macos_atomic::write(path, data)
+}
+
+#[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+fn atomic_write_native(path: &Path, data: &[u8]) -> io::Result<()> {
     let tmp = temp_path(path);
     let r = (|| {
         {
@@ -48,6 +76,7 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
 
 /// Best-effort directory fsync (persists the rename on POSIX; not possible on Windows, where
 /// `MoveFileEx` with write-through semantics is already durable enough).
+#[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
 fn sync_dir(dir: &Path) {
     if let Ok(d) = File::open(dir) {
         let _ = d.sync_all();

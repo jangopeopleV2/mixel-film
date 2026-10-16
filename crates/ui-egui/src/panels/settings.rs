@@ -51,6 +51,9 @@ pub struct SettingsDraft {
     /// Result of the last Label Color Presets button, or its error.
     #[serde(default)]
     pub preset_message: String,
+    /// Shared by this dialog's per-frame copies so a late picker cannot edit a reopened draft.
+    #[serde(skip)]
+    pub picker_identity: std::sync::Arc<()>,
 }
 
 /// Open the dialog on a category page.
@@ -645,25 +648,11 @@ fn label_presets(app: &mut FilmcraftApp, ui: &mut Ui, d: &mut SettingsDraft) {
             if preset_button(app, ui, "revert", Icon::Reset, tl!("Revert to the preset's colors and names"), modified) {
                 pick = selected.cloned();
             }
-            if preset_button(app, ui, "import", Icon::Import, tl!("Import a preset file…"), true)
-                && let Some(path) = app.hooks.pick_open_file.as_mut().and_then(|f| f(tl!("Label Color Presets"), &["json"]))
-            {
-                d.label_presets = None;
-                match app.session.import_label_preset(std::path::Path::new(&path)) {
-                    Ok(p) => {
-                        d.preset_message = tlf!("Imported “{name}”", name = p.name);
-                        pick = Some(p);
-                    }
-                    Err(e) => d.preset_message = e,
-                }
+            if preset_button(app, ui, "import", Icon::Import, tl!("Import a preset file…"), true) {
+                import_label_preset(app, d);
             }
-            if preset_button(app, ui, "export", Icon::Export, tl!("Export the labels to a preset file…"), true)
-                && let Some(path) = app.hooks.pick_save_as.as_mut().and_then(|f| f(tl!("Label Color Presets"), &["json"], &format!("{}.json", labels.preset)))
-            {
-                d.preset_message = match settings::LabelPreset::export(std::path::Path::new(&path), &labels) {
-                    Ok(_) => tlf!("Exported to {path}", path),
-                    Err(e) => e,
-                };
+            if preset_button(app, ui, "export", Icon::Export, tl!("Export the labels to a preset file…"), true) {
+                export_label_preset(app, d, labels.clone());
             }
             if preset_button(app, ui, "folder", Icon::Folder, tl!("Show the presets folder"), folder.is_some())
                 && let Some(dir) = &folder
@@ -701,6 +690,58 @@ fn label_presets(app: &mut FilmcraftApp, ui: &mut Ui, d: &mut SettingsDraft) {
             put(&mut d.values, "labels", v);
         }
     }
+}
+
+fn same_label_draft(app: &FilmcraftApp, identity: &std::sync::Arc<()>, labels: &Value) -> bool {
+    matches!(app.dialog, Some(Dialog::Preferences))
+        && app.ui.settings.as_ref().is_some_and(|d| std::sync::Arc::ptr_eq(&d.picker_identity, identity) && get(&d.values, "labels") == labels)
+}
+
+fn import_label_preset(app: &mut FilmcraftApp, draft: &SettingsDraft) {
+    let identity = draft.picker_identity.clone();
+    let labels = get(&draft.values, "labels").clone();
+    app.pick_ui(FileDialog::open_file(tl!("Label Color Presets"), &["json"]), move |app, paths| {
+        let Some(path) = paths.into_iter().next() else { return };
+        if !same_label_draft(app, &identity, &labels) {
+            return;
+        }
+        let result = app.session.import_label_preset(std::path::Path::new(&path));
+        if let Some(draft) = app.ui.settings.as_mut() {
+            draft.label_presets = None;
+            match result {
+                Ok(preset) => {
+                    let mut labels: settings::LabelPrefs = serde_json::from_value(labels).unwrap_or_default();
+                    preset.apply(&mut labels);
+                    match serde_json::to_value(labels) {
+                        Ok(value) => {
+                            put(&mut draft.values, "labels", value);
+                            draft.preset_message = tlf!("Imported “{name}”", name = preset.name);
+                        }
+                        Err(error) => draft.preset_message = error.to_string(),
+                    }
+                }
+                Err(error) => draft.preset_message = error,
+            }
+        }
+    });
+}
+
+fn export_label_preset(app: &mut FilmcraftApp, draft: &SettingsDraft, labels: settings::LabelPrefs) {
+    let identity = draft.picker_identity.clone();
+    let before = get(&draft.values, "labels").clone();
+    app.pick_ui(FileDialog::save_as(tl!("Label Color Presets"), &["json"], &format!("{}.json", labels.preset)), move |app, paths| {
+        let Some(path) = paths.into_iter().next() else { return };
+        if !same_label_draft(app, &identity, &before) {
+            return;
+        }
+        let result = settings::LabelPreset::export(std::path::Path::new(&path), &labels);
+        if let Some(draft) = app.ui.settings.as_mut() {
+            draft.preset_message = match result {
+                Ok(_) => tlf!("Exported to {path}", path),
+                Err(error) => error,
+            };
+        }
+    });
 }
 
 /// An icon button of the Label Color Presets row (`settings.labelPresets.<id>`).
@@ -953,6 +994,72 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
 mod tests {
     use super::*;
     use crate::theme::ThemeKind;
+
+    fn label_picker(app: &mut FilmcraftApp, export: bool) -> std::sync::mpsc::Sender<Vec<String>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut rx = Some(rx);
+        app.hooks.pick_open_file = Some(Box::new(|_, _| panic!("Label preset import must use the native sheet runner")));
+        app.hooks.pick_save_as = Some(Box::new(|_, _, _| panic!("Label preset export must use the native sheet runner")));
+        app.hooks.run_dialog = Some(Box::new(move |dialog| {
+            assert!(if export {
+                matches!(dialog, FileDialog::SaveAs { exts, name, .. } if exts == ["json"] && name == "Default.json")
+            } else {
+                matches!(dialog, FileDialog::OpenFile { exts, .. } if exts == ["json"])
+            });
+            rx.take().unwrap()
+        }));
+        let draft = app.ui.settings.as_ref().unwrap().clone();
+        if export {
+            export_label_preset(app, &draft, serde_json::from_value(get(&draft.values, "labels").clone()).unwrap());
+        } else {
+            import_label_preset(app, &draft);
+        }
+        assert!(app.native_dialog_open());
+        tx
+    }
+
+    #[test]
+    fn cancelled_label_preset_sheets_keep_the_draft_and_messages() {
+        for export in [false, true] {
+            let mut app = FilmcraftApp::new(filmcraft_engine::Session::default());
+            open(&mut app, "labels").unwrap();
+            app.ui.settings.as_mut().unwrap().preset_message = "Keep this message".into();
+            let before = serde_json::to_value(&app.ui.settings).unwrap();
+            let answer = label_picker(&mut app, export);
+            answer.send(vec![]).unwrap();
+            app.poll_native_dialog(&egui::Context::default());
+            assert_eq!(serde_json::to_value(&app.ui.settings).unwrap(), before);
+            assert!(!app.native_dialog_open());
+        }
+    }
+
+    #[test]
+    fn label_preset_answers_do_not_touch_closed_reopened_or_newer_drafts() {
+        for export in [false, true] {
+            for changed in ["closed", "reopened", "labels"] {
+                let mut app = FilmcraftApp::new(filmcraft_engine::Session::default());
+                open(&mut app, "labels").unwrap();
+                let answer = label_picker(&mut app, export);
+                match changed {
+                    "closed" => {
+                        app.ui.settings = None;
+                        app.dialog = None;
+                    }
+                    "reopened" => {
+                        open(&mut app, "labels").unwrap();
+                    }
+                    "labels" => patch(&mut app, &json!({"values": {"labels.colors.rose.name": "Newer name"}})).unwrap(),
+                    _ => unreachable!(),
+                }
+                let before = serde_json::to_value(&app.ui.settings).unwrap();
+                // An attempted import/export at this invalid path would change preset_message.
+                answer.send(vec!["/mixel-phase1-missing-parent/do-not-write.json".into()]).unwrap();
+                app.poll_native_dialog(&egui::Context::default());
+                assert_eq!(serde_json::to_value(&app.ui.settings).unwrap(), before, "{export} {changed}");
+                assert!(!app.native_dialog_open());
+            }
+        }
+    }
 
     #[test]
     fn favorite_theme_star_and_shortcut_select_explicit_family() {

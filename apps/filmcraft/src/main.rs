@@ -27,6 +27,7 @@ mod appearance;
 mod args;
 mod audio;
 mod audio_in;
+#[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
 mod control_server;
 #[cfg(target_os = "linux")]
 mod dev_icon;
@@ -81,7 +82,7 @@ fn main() -> eframe::Result {
     let logger = logging::install();
     // lossy, so a value that is not Unicode is reported like any other bad port instead of ignored
     let env_port = std::env::var_os("FILMCRAFT_CONTROL_PORT").map(|p| p.to_string_lossy().into_owned());
-    let launch = match args::parse(env_port, std::env::args_os().skip(1)) {
+    let mut launch = match args::parse(env_port, std::env::args_os().skip(1)) {
         Ok(Cli::Run(l)) => l,
         Ok(Cli::Help) => {
             tell(args::USAGE, false);
@@ -96,6 +97,18 @@ fn main() -> eframe::Result {
             std::process::exit(2);
         }
     };
+    for warning in filmcraft_engine::macos_mas::initialize("MIXEL Film") {
+        log::warn!("{warning}");
+    }
+    if filmcraft_engine::macos_mas::enabled() && filmcraft_engine::macos_mas::container_dir("MIXEL Film").is_none() {
+        log::error!("This App Store build must run from its correctly signed sandbox app bundle.");
+        std::process::exit(2);
+    }
+    if filmcraft_engine::macos_mas::enabled() {
+        launch.control_port = None;
+        launch.control_input_only = false;
+        launch.data_dir = filmcraft_engine::macos_mas::container_dir("MIXEL Film");
+    }
     let data_root = launch.data_dir.clone().or_else(default_data_dir);
     let log_dir = data_root.as_ref().map(|d| d.join(logging::LOG_DIR));
     log::info!("MIXEL Film {} ({} {})", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
@@ -188,6 +201,8 @@ fn native_options(agent: bool) -> eframe::NativeOptions {
 /// and confirms the graphics mode once two frames have painted.
 fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<AtomicBool>) -> eframe::AppCreator<'static> {
     let Launch { control_port, control_input_only, files, demo, startup_flag, recover, data_dir, graphics: _ } = launch;
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    let _ = (control_port, control_input_only);
     Box::new(move |cc| {
         created.store(true, Ordering::Relaxed);
         // A fallback graphics mode says so in the window, with a button back to the default.
@@ -221,7 +236,14 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
             }
         } else if !startup_flag && session.prefs.general.at_startup == "openMostRecent" {
             // Settings ▸ General ▸ At Startup ▸ Open Most Recent
-            let recent = session.prefs.general.recent_projects.iter().find(|p| std::path::Path::new(p).exists()).cloned();
+            let recent = session
+                .prefs
+                .general
+                .recent_projects
+                .iter()
+                .filter_map(|p| filmcraft_engine::macos_mas::resolve(p).ok())
+                .find(|p| p.exists())
+                .map(|p| p.to_string_lossy().into_owned());
             match recent {
                 Some(p) => {
                     if let Err(e) = session.execute("file.open", json!({"path": p})) {
@@ -266,6 +288,7 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
                 .pick_files()
                 .unwrap_or_default()
                 .into_iter()
+                .filter_map(|p| filmcraft_engine::macos_mas::picked(p, false))
                 .map(|p| p.to_string_lossy().to_string())
                 .collect()
         }));
@@ -274,14 +297,14 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
             rfd::FileDialog::new()
                 .add_filter(filmcraft_ui_egui::i18n::t("Media"), &file_filters::extensions(exts))
                 .pick_file()
-                .map(|p| p.to_string_lossy().to_string())
+                .and_then(|p| filmcraft_engine::macos_mas::picked(p, false).map(|p| p.to_string_lossy().into_owned()))
         }));
         app.hooks.pick_save = Some(Box::new(|name: &str| {
             rfd::FileDialog::new()
                 .add_filter(filmcraft_ui_egui::i18n::t("MIXEL Film Project"), &file_filters::extensions(&["fcproj"]))
                 .set_file_name(name)
                 .save_file()
-                .map(|p| p.to_string_lossy().to_string())
+                .and_then(|p| filmcraft_engine::macos_mas::picked(p, true).map(|p| p.to_string_lossy().into_owned()))
         }));
         app.hooks.pick_save_as = Some(Box::new(|filter: &str, exts: &[&str], name: &str| {
             // a full path (Quick Export, Export mode) opens the dialog in its folder
@@ -292,17 +315,29 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
             if let Some(dir) = path.parent().filter(|d| d.is_dir()) {
                 dialog = dialog.set_directory(dir);
             }
-            dialog.save_file().map(|p| p.to_string_lossy().to_string())
+            dialog.save_file().and_then(|p| filmcraft_engine::macos_mas::picked(p, true).map(|p| p.to_string_lossy().into_owned()))
         }));
-        app.hooks.pick_folder = Some(Box::new(|| rfd::FileDialog::new().pick_folder().map(|p| p.to_string_lossy().to_string())));
-        app.hooks.pick_folder_at =
-            Some(Box::new(|dir: &str| rfd::FileDialog::new().set_directory(dir).pick_folder().map(|p| p.to_string_lossy().into_owned())));
+        app.hooks.pick_folder = Some(Box::new(|| {
+            rfd::FileDialog::new().pick_folder().and_then(|p| filmcraft_engine::macos_mas::picked(p, false).map(|p| p.to_string_lossy().into_owned()))
+        }));
+        app.hooks.pick_folder_at = Some(Box::new(|dir: &str| {
+            rfd::FileDialog::new()
+                .set_directory(dir)
+                .pick_folder()
+                .and_then(|p| filmcraft_engine::macos_mas::picked(p, false).map(|p| p.to_string_lossy().into_owned()))
+        }));
         // Linux: the XDG portal call blocks until the user chooses, which would stop the frame
         // loop (GNOME offers to force-quit the window after about five seconds, #260). Show the
         // dialog on its own thread instead; the app keeps running and acts on the answer.
         #[cfg(target_os = "linux")]
         {
             app.hooks.run_dialog = Some(Box::new(run_dialog_off_thread));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let parent = cc.winit_window().cloned();
+            let ui = cc.egui_ctx.clone();
+            app.hooks.run_dialog = Some(Box::new(move |dialog| run_dialog_sheet(dialog, parent.as_deref(), ui.clone())));
         }
         app.hooks.open_path = Some(Box::new(open_path));
         // Help menu, About and Discord links (#642): eframe is built without its `links`
@@ -323,13 +358,13 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
             rfd::FileDialog::new()
                 .add_filter(filmcraft_ui_egui::i18n::t(filter), &file_filters::extensions(exts))
                 .pick_file()
-                .map(|p| p.to_string_lossy().to_string())
+                .and_then(|p| filmcraft_engine::macos_mas::picked(p, false).map(|p| p.to_string_lossy().into_owned()))
         }));
         app.hooks.pick_open_project = Some(Box::new(|| {
             rfd::FileDialog::new()
                 .add_filter(filmcraft_ui_egui::i18n::t("MIXEL Film Project"), &file_filters::extensions(&["fcproj"]))
                 .pick_file()
-                .map(|p| p.to_string_lossy().to_string())
+                .and_then(|p| filmcraft_engine::macos_mas::picked(p, false).map(|p| p.to_string_lossy().into_owned()))
         }));
         #[cfg(target_os = "macos")]
         {
@@ -338,6 +373,7 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
             app.hooks.menu_changed = Some(update);
             app.ui.show_menu_bar = false;
         }
+        #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
         if let Some(port) = control_port {
             let rx = control_server::start(port, cc.egui_ctx.clone());
             app = if control_input_only { app.with_control_input_only(rx) } else { app.with_control(rx) };
@@ -438,6 +474,91 @@ fn agent_event_loop(agent: bool) -> Option<eframe::EventLoopBuilderHook> {
     None
 }
 
+/// Start AppKit sheets on the main thread, then wait without re-entering winit's event loop.
+#[cfg(target_os = "macos")]
+fn run_dialog_sheet(
+    request: filmcraft_ui_egui::native_dialogs::FileDialog,
+    parent: Option<&winit::window::Window>,
+    ui: egui::Context,
+) -> std::sync::mpsc::Receiver<Vec<String>> {
+    use filmcraft_ui_egui::native_dialogs::FileDialog;
+    use std::future::Future;
+    use std::pin::Pin;
+    use winit::raw_window_handle::HasWindowHandle as _;
+    type Answer = Pin<Box<dyn Future<Output = Vec<String>> + Send>>;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mtm = objc2::MainThreadMarker::new();
+    let running = mtm.is_some_and(|mtm| objc2_app_kit::NSApplication::sharedApplication(mtm).isRunning());
+    let Some(parent) = parent.filter(|window| running && window.window_handle().is_ok()) else {
+        filmcraft_engine::macos_mas::notice("No app window is available for file selection. Try again from the app window.".into());
+        log::error!("No running main-thread window is available for file selection");
+        return rx;
+    };
+    let (future_tx, future_rx) = std::sync::mpsc::channel::<Answer>();
+    if let Err(error) = std::thread::Builder::new().name("file-dialog-sheet".into()).spawn(move || {
+        if let Ok(answer) = future_rx.recv() {
+            let _ = tx.send(pollster::block_on(answer));
+            ui.request_repaint();
+        }
+    }) {
+        filmcraft_engine::macos_mas::notice(format!("Could not start the file chooser: {error}"));
+        log::error!("Cannot start file dialog waiter: {error}");
+        return rx;
+    }
+    let dialog = rfd::AsyncFileDialog::new().set_parent(parent);
+    let request = prepare_dialog(request);
+    let save = matches!(&request, FileDialog::SaveProject { .. } | FileDialog::SaveAs { .. });
+    let one = move |file: Option<rfd::FileHandle>| {
+        file.into_iter().filter_map(|f| filmcraft_engine::macos_mas::picked(f.path(), save)).map(|p| p.to_string_lossy().into_owned()).collect()
+    };
+    let answer: Pin<Box<dyn Future<Output = Vec<String>> + Send>> = match request {
+        FileDialog::OpenFiles { exts } => {
+            let picked = dialog.add_filter(filmcraft_ui_egui::i18n::t("Media"), &exts).pick_files();
+            Box::pin(async move {
+                picked
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|f| filmcraft_engine::macos_mas::picked(f.path(), false))
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect()
+            })
+        }
+        FileDialog::OpenFile { filter, exts } => {
+            let picked = dialog.add_filter(filter, &exts).pick_file();
+            Box::pin(async move { one(picked.await) })
+        }
+        FileDialog::Relink { exts, .. } => {
+            let picked = dialog.add_filter(filmcraft_ui_egui::i18n::t("Media"), &exts).pick_file();
+            Box::pin(async move { one(picked.await) })
+        }
+        FileDialog::OpenProject => {
+            let picked = dialog.add_filter("MIXEL Film Project", &["fcproj"]).pick_file();
+            Box::pin(async move { one(picked.await) })
+        }
+        FileDialog::SaveProject { name } => {
+            let picked = dialog.add_filter("MIXEL Film Project", &["fcproj"]).set_file_name(name).save_file();
+            Box::pin(async move { one(picked.await) })
+        }
+        FileDialog::SaveAs { filter, exts, name } => {
+            let picked = dialog.add_filter(filter, &exts).set_file_name(name).save_file();
+            Box::pin(async move { one(picked.await) })
+        }
+        FileDialog::Folder { at } => {
+            let dialog = match at {
+                Some(path) if !path.is_empty() => dialog.set_directory(path),
+                _ => dialog,
+            };
+            let picked = dialog.pick_folder();
+            Box::pin(async move { one(picked.await) })
+        }
+    };
+    if future_tx.send(answer).is_err() {
+        filmcraft_engine::macos_mas::notice("The file chooser stopped before it could answer. Try again from the app window.".into());
+    }
+    rx
+}
+
 /// Show `dialog` with rfd on a worker thread and answer on the returned channel (#260). Filter
 /// names are translated here, on the UI thread (the interface language is per thread). A dialog
 /// thread that can't start or panics drops the sender: the app takes that as cancelled.
@@ -492,7 +613,7 @@ fn run_dialog_off_thread(dialog: filmcraft_ui_egui::native_dialogs::FileDialog) 
 /// A dialog as the Linux dialog thread shows it: filter names translated (here, on the UI thread:
 /// the interface language is per thread) and every extension list turned into the
 /// case-insensitive patterns the synchronous pickers use, so `CLIP.MP4` stays visible (#262).
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn prepare_dialog(dialog: filmcraft_ui_egui::native_dialogs::FileDialog) -> filmcraft_ui_egui::native_dialogs::FileDialog {
     use filmcraft_ui_egui::native_dialogs::FileDialog;
     let t = |s: &str| filmcraft_ui_egui::i18n::t(s).to_string();

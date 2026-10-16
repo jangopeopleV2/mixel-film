@@ -10,6 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [features]
+mac-app-store = ["dep:apple-scoped-bookmarks", "dep:objc2-foundation", "filmcraft-format/mac-app-store", "filmcraft-export/mac-app-store"]
 default = []
 # Speech-to-text with Whisper (candle, CPU). Off by default and in wasm builds.
 whisper = ["filmcraft-speech/whisper"]
@@ -49,3 +50,7 @@ filmcraft-testkit = { workspace = true }
 filmcraft-dng = { workspace = true, features = ["writer"] }
 filmcraft-isobmff = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png", "gif"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-scoped-bookmarks = { version = "=0.1.0", optional = true }
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = ["std", "NSPathUtilities", "NSBundle"] }

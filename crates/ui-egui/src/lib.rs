@@ -29,6 +29,7 @@ macro_rules! tlf {
     };
 }
 
+pub use filmcraft_engine::macos_mas;
 pub mod automation;
 pub mod brand;
 pub mod calc;
@@ -1388,6 +1389,12 @@ impl FilmcraftApp {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         let mut paths = Vec::new();
         for f in dropped {
+            if f.path().is_absolute()
+                && let Err(error) = crate::macos_mas::selected(f.path(), false)
+            {
+                self.ui.status = error;
+                continue;
+            }
             let p = f.path();
             if p.exists() {
                 paths.push(p.to_string_lossy().to_string());
@@ -2036,6 +2043,9 @@ impl eframe::App for FilmcraftApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        for warning in crate::macos_mas::poll() {
+            self.ui.status = warning;
+        }
         // a native file dialog's answer first, so the panels draw what it chose (#260)
         self.poll_native_dialog(ctx);
         if !self.styled {

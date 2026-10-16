@@ -969,6 +969,10 @@ pub fn previews_dir(s: &Session) -> Option<std::path::PathBuf> {
 
 /// [`previews_dir`] for `project` saved at `path`.
 pub fn previews_dir_for(project: &Project, path: &str) -> std::path::PathBuf {
+    if crate::macos_mas::enabled() {
+        let stem = std::path::Path::new(path).file_stem().unwrap_or_else(|| std::ffi::OsStr::new("Untitled"));
+        return crate::macos_mas::cache_dir("MIXEL Film").unwrap_or_else(|| std::path::PathBuf::from("/dev/null/MIXEL Film Cache")).join("Previews").join(stem);
+    }
     match &project.settings.scratch.video_previews {
         Some(d) if !d.is_empty() => {
             let stem = std::path::Path::new(path).file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".into());

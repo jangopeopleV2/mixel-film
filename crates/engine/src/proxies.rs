@@ -97,6 +97,11 @@ pub fn transcode(
     preset: &Preset,
     progress: &Progress,
 ) -> std::result::Result<Report, String> {
+    if crate::macos_mas::enabled() && !Path::new(out).parent().is_some_and(crate::macos_mas::directory_granted) {
+        return Err(
+            "Proxy and collected media outputs need an explicitly selected destination folder. Choose that folder in the native folder picker first".into()
+        );
+    }
     let info = &clip.info;
     let rate = clip.frame_rate();
     let mut st = SequenceSettings::default();
@@ -221,6 +226,9 @@ pub fn start_job(s: &mut Session, label: String, work: Vec<(ItemId, String, &'st
                     outs.lock().unwrap_or_else(|e| e.into_inner()).push((item, out));
                 }
                 Err(e) => {
+                    // MAS streaming owns only its private stage until commit. A failed
+                    // export must never remove a pre-existing final destination.
+                    #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
                     let _ = std::fs::remove_file(&out);
                     err = Some(format!("{name}: {e}"));
                     break;
@@ -382,6 +390,9 @@ pub fn create(s: &mut Session, p: &Value) -> Result<Value> {
 /// first and create the output exclusively, so a failed read or a competing copy cannot replace
 /// an existing destination. Relink only after the copy's identity has been checked.
 fn copy_for_ingest(s: &mut Session, item: ItemId, path: &str, dir: &Path) -> Result<String> {
+    if crate::macos_mas::enabled() && !crate::macos_mas::directory_granted(dir) {
+        return Err(bad("ingest", "Copying media needs an explicitly selected destination folder. Choose it in the native folder picker first"));
+    }
     let source = Path::new(path);
     let name = source.file_name().ok_or_else(|| bad("ingest", "source has no file name"))?;
     let mut input = std::fs::File::open(source).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;

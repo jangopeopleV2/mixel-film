@@ -37,6 +37,9 @@ pub use settings::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
+#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+pub mod macos_atomic;
+
 use filmcraft_isobmff::SampleEntry;
 use filmcraft_project::{ItemId, Project};
 use filmcraft_render::SourceProvider;
@@ -406,6 +409,10 @@ pub struct ExportSettings {
     /// writing `path` (hosts without a filesystem: the web app offers the file as a download).
     #[serde(skip)]
     pub sink: Option<OutputSink>,
+    /// Successful native publication; hosts refresh retained file access after commit.
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    #[serde(skip)]
+    pub committed: Option<OutputCommitted>,
 }
 
 /// Receives in-memory export output: `(path, bytes)` per finished file.
@@ -418,6 +425,19 @@ impl std::fmt::Debug for OutputSink {
     }
 }
 
+/// A notification after bytes have been committed. Any access-refresh warning belongs to
+/// the host; a committed save must not be reported as an uncommitted failure.
+#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+#[derive(Clone)]
+pub struct OutputCommitted(pub Arc<dyn Fn(&std::path::Path) + Send + Sync>);
+
+#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+impl std::fmt::Debug for OutputCommitted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OutputCommitted")
+    }
+}
+
 /// How an audio-only export codes its samples.
 enum AudioWriter {
     Pcm(pcm::PcmContainer),
@@ -426,7 +446,10 @@ enum AudioWriter {
 
 /// An export's output file: on disk, or in memory for an [`OutputSink`].
 enum Out {
+    #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
     File(std::io::BufWriter<std::fs::File>),
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    Atomic(Box<std::io::BufWriter<macos_atomic::StagedFile>>),
     Mem(std::io::Cursor<Vec<u8>>),
 }
 
@@ -440,8 +463,16 @@ impl Out {
         if settings.sink.is_some() {
             return Ok(Out::Mem(std::io::Cursor::new(Vec::new())));
         }
-        let f = std::fs::File::create(path).map_err(|e| ExportError::Io(format!("{path}: {e}")))?;
-        Ok(Out::File(std::io::BufWriter::new(f)))
+        #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+        {
+            let file = macos_atomic::StagedFile::new(std::path::Path::new(path)).map_err(|e| ExportError::Io(format!("{path}: {e}")))?;
+            Ok(Out::Atomic(Box::new(std::io::BufWriter::new(file))))
+        }
+        #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+        {
+            let f = std::fs::File::create(path).map_err(|e| ExportError::Io(format!("{path}: {e}")))?;
+            Ok(Out::File(std::io::BufWriter::new(f)))
+        }
     }
 
     /// Flush (and hand in-memory output to the sink); returns the file size.
@@ -451,9 +482,20 @@ impl Out {
 
     fn finish_path(self, settings: &ExportSettings, path: &str) -> Result<u64> {
         match self {
+            #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
             Out::File(mut w) => {
                 w.flush().map_err(|e| ExportError::Io(e.to_string()))?;
                 Ok(std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))
+            }
+            #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+            Out::Atomic(writer) => {
+                let mut staged = (*writer).into_inner().map_err(|e| ExportError::Io(e.to_string()))?;
+                let bytes = staged.file_mut().metadata().map_err(|e| ExportError::Io(e.to_string()))?.len();
+                let actual = staged.commit().map_err(|e| ExportError::Io(e.to_string()))?;
+                if let Some(committed) = &settings.committed {
+                    (committed.0)(&actual);
+                }
+                Ok(bytes)
             }
             Out::Mem(c) => write_output(settings, path, c.into_inner()),
         }
@@ -465,7 +507,20 @@ fn write_output(settings: &ExportSettings, path: &str, data: Vec<u8>) -> Result<
     let n = data.len() as u64;
     match &settings.sink {
         Some(sink) => (sink.0)(path, data),
-        None => std::fs::write(path, &data),
+        None => {
+            #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+            {
+                macos_atomic::write(std::path::Path::new(path), &data).map(|actual| {
+                    if let Some(committed) = &settings.committed {
+                        (committed.0)(&actual);
+                    }
+                })
+            }
+            #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+            {
+                std::fs::write(path, &data)
+            }
+        }
     }
     .map_err(|e| ExportError::Io(e.to_string()))?;
     Ok(n)
@@ -474,13 +529,19 @@ fn write_output(settings: &ExportSettings, path: &str, data: Vec<u8>) -> Result<
 impl Write for Out {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
+            #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
             Out::File(w) => w.write(buf),
+            #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+            Out::Atomic(w) => w.write(buf),
             Out::Mem(w) => w.write(buf),
         }
     }
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
+            #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
             Out::File(w) => w.flush(),
+            #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+            Out::Atomic(w) => w.flush(),
             Out::Mem(w) => w.flush(),
         }
     }
@@ -489,7 +550,10 @@ impl Write for Out {
 impl std::io::Seek for Out {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         match self {
+            #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
             Out::File(w) => w.seek(pos),
+            #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+            Out::Atomic(w) => w.seek(pos),
             Out::Mem(w) => w.seek(pos),
         }
     }
@@ -589,6 +653,8 @@ impl Default for ExportSettings {
             h264_pass: H264Pass::Single,
             signal: ColorSignal::default(),
             sink: None,
+            #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+            committed: None,
         }
     }
 }

@@ -158,6 +158,9 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
         LutFormat::Cube => lut.to_cube(),
         LutFormat::ThreeDl => lut.to_3dl().map_err(|e| bad("lut.export", e))?,
     };
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    s.services.write_file(path, text.as_bytes()).map_err(|e| bad("lut.export", format!("{path}: {e}")))?;
+    #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
     std::fs::write(path, &text).map_err(|e| bad("lut.export", format!("{path}: {e}")))?;
     Ok(json!({"path": path, "bytes": text.len()}))
 }
@@ -416,7 +419,9 @@ fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"preset": preset.name, "clips": n}))
 }
 
-fn preset_thumbnails(_: &mut Session, p: &Value) -> Result<Value> {
+fn preset_thumbnails(s: &mut Session, p: &Value) -> Result<Value> {
+    #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+    let _ = s;
     let cmd = "lumetri.presetThumbnails";
     let presets = presets_of(p);
     if presets.is_empty() {
@@ -429,6 +434,9 @@ fn preset_thumbnails(_: &mut Session, p: &Value) -> Result<Value> {
     let mut out = json!({"presets": presets.iter().map(|x| x.name).collect::<Vec<_>>(), "width": img.w, "height": img.h, "cell": [w, h], "columns": cols});
     if let Some(path) = str_p(p, "path") {
         let png = filmcraft_export::encode_png(img.over_black_rgba8(), img.w as u32, img.h as u32).map_err(|e| bad(cmd, e.to_string()))?;
+        #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+        s.services.write_file(path, &png).map_err(|e| bad(cmd, format!("{path}: {e}")))?;
+        #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
         std::fs::write(path, png).map_err(|e| bad(cmd, format!("{path}: {e}")))?;
         out["path"] = json!(path);
     }

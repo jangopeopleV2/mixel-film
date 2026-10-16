@@ -9,6 +9,9 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+mac-app-store = ["dep:objc2-foundation"]
+
 [dependencies]
 filmcraft-project = { workspace = true }
 filmcraft-media = { workspace = true }
@@ -19,3 +22,6 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 filmcraft-time = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = ["std", "NSFileManager", "NSPathUtilities", "NSString", "NSURL", "NSError", "NSDictionary"] }

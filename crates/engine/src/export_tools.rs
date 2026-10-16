@@ -472,6 +472,7 @@ pub fn spawn_export(s: &mut Session, project: Arc<Project>, seq: ItemId, mut set
         let services = s.services.clone();
         settings.sink = Some(filmcraft_export::OutputSink(Arc::new(move |path: &str, data: Vec<u8>| services.write_file(path, &data))));
     }
+    prepare_native_export(&mut settings)?;
     if let Some(dir) = Path::new(&settings.path).parent().filter(|d| !d.as_os_str().is_empty() && !s.services.export_in_memory()) {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -507,6 +508,31 @@ pub fn spawn_export(s: &mut Session, project: Arc<Project>, seq: ItemId, mut set
         std::thread::Builder::new().name("filmcraft-export".into()).spawn(run).map_err(|e| EngineError::Other(e.to_string()))?;
     }
     Ok(id)
+}
+
+/// Retain one explicit destination grant across native streaming and refresh it only
+/// after Foundation has committed complete output. Multiple outputs need a chosen folder.
+pub(crate) fn prepare_native_export(settings: &mut ExportSettings) -> Result<()> {
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    if settings.sink.is_none() {
+        let path = crate::macos_mas::resolve(&settings.path).map_err(EngineError::Other)?;
+        let multiple = settings.is_image_sequence() || settings.format == Format::MxfOpAtom || settings.caption_sidecar.is_some();
+        if multiple && !path.parent().is_some_and(crate::macos_mas::directory_granted) {
+            return Err(EngineError::Other(
+                "This export writes several files. Choose its destination folder in the native folder picker before exporting".into(),
+            ));
+        }
+        settings.path = path.to_string_lossy().into_owned();
+        settings.committed = Some(filmcraft_export::OutputCommitted(Arc::new(|actual| {
+            if let Err(error) = crate::macos_mas::after_write(actual) {
+                // after_write queues an actionable UI notice; committed bytes remain saved.
+                log::warn!("Export saved, but its retained file access could not be refreshed: {error}");
+            }
+        })));
+    }
+    #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+    let _ = settings;
+    Ok(())
 }
 
 /// Last-resort guard for a background job body (export, previews, proxies, …): a panic marks the

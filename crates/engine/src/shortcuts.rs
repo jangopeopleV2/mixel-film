@@ -1081,10 +1081,18 @@ fn read_file(path: &Path) -> std::result::Result<PresetFile, String> {
 }
 
 fn write_file(path: &Path, f: &PresetFile) -> std::result::Result<(), String> {
-    if let Some(d) = path.parent() {
+    if let Some(d) = path.parent().filter(|parent| !crate::macos_mas::enabled() || crate::macos_mas::directory_granted(parent)) {
         std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
-    filmcraft_format::atomic_write(path, &serde_json::to_vec_pretty(f).unwrap_or_default()).map_err(|e| format!("{}: {e}", path.display()))
+    #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+    {
+        let path = path.to_str().ok_or("The shortcuts save path is not valid Unicode")?;
+        crate::Services::write_file(&crate::FsServices, path, &serde_json::to_vec_pretty(f).unwrap_or_default()).map_err(|e| format!("{path}: {e}"))
+    }
+    #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+    {
+        filmcraft_format::atomic_write(path, &serde_json::to_vec_pretty(f).unwrap_or_default()).map_err(|e| format!("{}: {e}", path.display()))
+    }
 }
 
 // ------------------------------------------------------------------ commands

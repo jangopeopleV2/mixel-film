@@ -48,6 +48,76 @@ fn tmp(name: &str) -> String {
     d.join(name).to_string_lossy().to_string()
 }
 
+/// Encoding cancellation drops the stream before publication, preserving the previous export.
+#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+#[test]
+fn cancelled_atomic_stream_preserves_previous_export_and_never_notifies_commit() {
+    let path = tmp("mas-cancelled-original.mov");
+    std::fs::write(&path, b"previous complete movie").unwrap();
+    let notified = Arc::new(AtomicU64::new(0));
+    let count = notified.clone();
+    let settings = ExportSettings {
+        path: path.clone(),
+        committed: Some(OutputCommitted(Arc::new(move |_| {
+            count.fetch_add(1, Ordering::Relaxed);
+        }))),
+        ..Default::default()
+    };
+    let mut output = Out::create(&settings).unwrap();
+    output.write_all(b"unfinished new movie").unwrap();
+    drop(output);
+    assert_eq!(std::fs::read(&path).unwrap(), b"previous complete movie");
+    assert_eq!(notified.load(Ordering::Relaxed), 0);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+#[test]
+fn atomic_stream_refuses_concurrent_destination_changes_without_commit_notification() {
+    let path = tmp("mas-concurrent-original.mov");
+    std::fs::write(&path, b"previous complete movie").unwrap();
+    let notified = Arc::new(AtomicU64::new(0));
+    let count = notified.clone();
+    let settings = ExportSettings {
+        path: path.clone(),
+        committed: Some(OutputCommitted(Arc::new(move |_| {
+            count.fetch_add(1, Ordering::Relaxed);
+        }))),
+        ..Default::default()
+    };
+    let mut output = Out::create(&settings).unwrap();
+    output.write_all(b"new complete movie").unwrap();
+    std::fs::write(&path, b"concurrent writer's complete movie").unwrap();
+    assert!(output.finish(&settings).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"concurrent writer's complete movie");
+    assert_eq!(notified.load(Ordering::Relaxed), 0);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+#[test]
+fn atomic_stream_notifies_actual_destination_only_after_complete_publication() {
+    let path = tmp("mas-stream-committed.mov");
+    std::fs::write(&path, b"previous complete movie").unwrap();
+    let actual = Arc::new(Mutex::new(None));
+    let seen = actual.clone();
+    let settings = ExportSettings {
+        path: path.clone(),
+        committed: Some(OutputCommitted(Arc::new(move |path| {
+            *seen.lock().unwrap() = Some(path.to_path_buf());
+        }))),
+        ..Default::default()
+    };
+    let mut output = Out::create(&settings).unwrap();
+    output.write_all(b"new complete movie").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"previous complete movie");
+    assert_eq!(output.finish(&settings).unwrap(), b"new complete movie".len() as u64);
+    assert_eq!(std::fs::read(&path).unwrap(), b"new complete movie");
+    let actual = actual.lock().unwrap().clone().unwrap();
+    assert_eq!(std::fs::canonicalize(actual).unwrap(), std::fs::canonicalize(&path).unwrap());
+    std::fs::remove_file(path).unwrap();
+}
+
 #[test]
 fn mjpeg_mov_roundtrip() {
     let (p, seq, m) = project();

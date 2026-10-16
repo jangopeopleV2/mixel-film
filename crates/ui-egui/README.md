@@ -84,3 +84,44 @@ buttons use `craft-ui::layout::fit_toolbar`; commands beyond the available width
 through More, including their selected state and Source/Program routing. A scrolling fallback
 retains all commands if even More cannot fit. `monitor_geometry` checks the painted readouts,
 control bounds, overflow actions and Source drag payloads across monitor widths and themes.
+
+## Mac App Store dialogs — 2026-10-14
+
+The `mac-app-store` variant requires a parented asynchronous sheet runner. The native
+future is created on the main thread and its result is awaited off that thread;
+missing services produce an actionable error instead of a synchronous AppKit fallback.
+Only one picker is pending at a time. Project opening waits for an explicit containing
+folder grant, and cancellation or an unrelated folder cannot open the project. Deferred
+label-preset and quick-export answers retain the intended draft/selection identity and
+ignore answers for closed, replaced or changed state. Ordinary builds retain their
+existing synchronous host behavior. See [`src/native_dialogs.rs`](src/native_dialogs.rs)
+and the [MAS packaging contract](../../packaging/macos/README-mas.md).
+
+The implementation uses the production verified-container, scoped-bookmark and
+Foundation atomic-save paths; MAS control listeners are disabled. Source regression
+cases cover the required sheet service, explicit folder authorization, cancellation,
+and deferred label/quick-export state. Full MAS CI/build and signed UI runtime
+verification was pending when this dated implementation entry was added; current verification and internal delivery evidence
+are tracked in suite STATUS.md; this source record is not a passing test result. Older
+source-bound receipts do not establish this closure. Native-panel observations,
+distributed desktop launches and TestFlight installation remain separate observations;
+actual delivery status belongs in the suite STATUS.md. No parity score, estimate or
+milestone completion is changed.
+
+### AAF / OMF companion destinations — 2026-10-15
+
+Separate audio, rendered linked audio and AAF video mixdowns require an explicitly
+selected containing folder in the Mac App Store variant. The engine checks that
+scope before creating directories, rendering media or writing the interchange file.
+Plain linked AAF and embedded audio retain the single-file workflow; plain linked
+exports do not create an unused media directory.
+
+The settings dialog retains the chosen filename, export options, original project
+and sequence across Save and Folder sheets. Cancelling the folder sheet, selecting
+an unrelated folder, or losing the sheet service restores the settings without
+writing output. Replacing or editing the project while the destination is being
+chosen cancels the pending export; changing only the active sequence does not
+retarget it. The engine independently rechecks real directory scope at execution.
+Regression coverage lives in `panels/interchange_export_permissions_tests.rs` and
+the engine's `aaf_omf::macos_mas_companion_tests`; current run results remain in the
+suite STATUS.md rather than being inferred from this source record.

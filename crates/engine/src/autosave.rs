@@ -484,6 +484,9 @@ pub const PORTABLE_MARKER: &str = "portable.txt";
 
 /// `<exe_dir>/data` when `exe_dir` holds [`PORTABLE_MARKER`], else `None`.
 pub fn portable_data_dir(exe_dir: &Path) -> Option<PathBuf> {
+    if crate::macos_mas::enabled() {
+        return None;
+    }
     exe_dir.join(PORTABLE_MARKER).is_file().then(|| exe_dir.join("data"))
 }
 
@@ -492,6 +495,9 @@ pub fn portable_data_dir(exe_dir: &Path) -> Option<PathBuf> {
 /// macOS `~/Library/Application Support/MIXEL Film`, Windows `%APPDATA%\MIXEL Film`,
 /// elsewhere `$XDG_DATA_HOME/filmcraft` or `~/.local/share/filmcraft`.
 pub fn default_data_dir() -> Option<PathBuf> {
+    if crate::macos_mas::enabled() {
+        return crate::macos_mas::container_dir("MIXEL Film");
+    }
     let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
     if let Some(d) = env("FILMCRAFT_DATA_DIR") {
         return Some(d);
@@ -506,6 +512,17 @@ pub fn default_data_dir() -> Option<PathBuf> {
         return env("APPDATA").map(|h| h.join("MIXEL Film"));
     }
     env("XDG_DATA_HOME").map(|d| d.join("filmcraft")).or_else(|| env("HOME").map(|h| h.join(".local/share/filmcraft")))
+}
+
+/// Container-local auto-save namespace for one project; same-named projects stay separate.
+pub fn sandbox_auto_save_dir(path: Option<&str>) -> Option<PathBuf> {
+    if !crate::macos_mas::enabled() {
+        return None;
+    }
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hash);
+    Some(crate::macos_mas::container_dir("MIXEL Film")?.join(names::AUTO_SAVE_DIR).join(format!("{:016x}", hash.finish())))
 }
 
 pub fn unix_now() -> i64 {
@@ -1016,6 +1033,8 @@ impl Worker {
             }
             None => (self.data_dir.join(names::AUTO_SAVE_DIR), s.project.name.clone()),
         };
+        let dir =
+            if crate::macos_mas::enabled() { sandbox_auto_save_dir(s.path.as_deref()).ok_or("The App Store auto-save container is unavailable")? } else { dir };
         let t0 = Instant::now();
         let bytes = filmcraft_format::encode(&s.project, false);
         let serialize_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -1030,7 +1049,20 @@ impl Worker {
                 if self.prefs.save_current_project
                     && let Some(p) = &s.path
                 {
-                    match filmcraft_format::atomic_write(Path::new(p), &bytes) {
+                    let saved = crate::macos_mas::resolve(p).and_then(|resolved| {
+                        #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+                        let actual = filmcraft_format::atomic::atomic_write_path(&resolved, &bytes).map_err(|e| e.to_string())?;
+                        #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+                        let actual = {
+                            filmcraft_format::atomic_write(&resolved, &bytes).map_err(|e| e.to_string())?;
+                            resolved
+                        };
+                        if let Err(e) = crate::macos_mas::after_write(&actual) {
+                            self.error(format!("Project saved, but persistent file access could not be refreshed: {e}"));
+                        }
+                        Ok(())
+                    });
+                    match saved {
                         Ok(()) => {
                             let _ = self.events.send(WorkerEvent::SavedProject { path: p.clone(), revision: s.revision });
                         }

@@ -549,7 +549,15 @@ impl LabelPreset {
 
     pub fn write(&self, path: &Path) -> std::result::Result<(), String> {
         let bytes = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
-        filmcraft_format::atomic_write(path, &bytes).map_err(|e| format!("{}: {e}", path.display()))
+        #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+        {
+            let path = path.to_str().ok_or("The preset save path is not valid Unicode")?;
+            crate::Services::write_file(&crate::FsServices, path, &bytes).map_err(|e| format!("{path}: {e}"))
+        }
+        #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+        {
+            filmcraft_format::atomic_write(path, &bytes).map_err(|e| format!("{}: {e}", path.display()))
+        }
     }
 
     /// Save `labels`' names and colours to `path` as a preset named after the file.
@@ -1600,6 +1608,9 @@ pub fn apply_media_scaling(ti: &mut filmcraft_project::TrackItem, scaling: &str,
 
 /// The media cache folder: the configured location, else `<data dir>/Media Cache`.
 pub fn media_cache_dir(prefs: &MediaCachePrefs, data_dir: Option<&Path>) -> Option<PathBuf> {
+    if crate::macos_mas::enabled() {
+        return crate::macos_mas::cache_dir("MIXEL Film");
+    }
     if !prefs.location.trim().is_empty() {
         return Some(PathBuf::from(prefs.location.trim()));
     }

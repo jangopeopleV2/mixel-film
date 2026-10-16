@@ -1,60 +1,36 @@
 # MIXEL Film app icon
 
-**Creature:** an owl with ear tufts, in a frontal head-and-shoulders portrait. It is the template the
-other Crafting App icons follow.
+This revision uses the exact user-supplied `mixel_core_clean_master.png` as its MIXEL brand base, with an independently drawn **clapperboard, play triangle and music note** product symbol and the uppercase product name **FILM**. The supplied brand has not been vectorized or claimed as newly authored open-source art.
 
-## Palette
+## Editable composition and provenance
 
-Exactly three colours:
+The supplied PNG is 1024 × 1024 RGB, SHA-256 `d968314eb375bfc4441e73fd6b4ace5db157128a0b591e10c5187532edc5b516`. Its exact bytes are embedded as a PNG data URI in the `supplied-mixel-master` image element. The `product-symbol` group adds original vectors in the 1024-space box `x=400, y=292, width=224, height=175`. Product-name outlines are centered at baseline `714`, using Inter SemiBold at size `68` with tracking `3.5`; they are paths, not a runtime font dependency.
 
-| Colour | Hex | Used for |
-|---|---|---|
-| Ink | `#0b0b0c` | line work and the figure's contour |
-| Paper | `#efe9dc` | the figure (the owl) |
-| MIXEL Film violet (app colour) | `#8b5cf6` | the full-bleed field behind the figure |
+The 512 × 512 canonical source has the exact root header `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">`, uses uniform half-scale composition, and clips only the outer white corners to `rx=104`. Keep the embedded master unchanged. Edit the independent product symbol and name-outline groups without redrawing, recoloring or replacing the supplied brand. No five-point-M geometry or old per-product jewel-tone palette is used. Current symbol strokes use `#242121`, accents `#BB181A` and white fills.
 
-## Geometry and style
+The independently editable glyph sources are delivered separately with the icon artwork. The committed canonical SVG contains the base and all vector overlays, so the existing repository generation script can regenerate its derived assets without the builder or any new font file. Changing the text outlines requires the existing licensed Inter SemiBold source and its notice; keep the original supplied PNG bytes intact.
 
-- A 512-unit viewBox tile, rounded square `rx=112`, with the app colour full bleed (no frame or border).
-- An engraving-style portrait in the owl-template framing: the top of the head near y 80–100, the
-  eyes at about 40 % of the height, and the shoulders running off the bottom edge.
-- macOS renders (`filmcraft.icns`, `filmcraft-macos-512.png`) put the tile in Apple's grid (824 of
-  1024 px, transparent margin). Windows, Linux and the web use the full-bleed tile.
+## Files and consumers
 
-## Provenance
+- `filmcraft.svg`, `filmcraft-small.svg`: self-contained production compositions; the compact file is byte-identical.
+- `filmcraft-1024.png`: the repository’s full-tile 1024 px composition.
+- `filmcraft-macos-512.png`: the existing padded macOS runtime image.
+- `filmcraft.icns`: macOS bundle icon; MAS packaging copies it to `Contents/Resources/MIXEL Film.icns`.
+- `filmcraft.ico`: Windows app icon.
+- `hicolor/<size>/apps/ch.mixel.film.png` (16, 24, 32, 48, 64, 128, 256, 512) and `hicolor/scalable/apps/ch.mixel.film.svg`: Linux/shared runtime assets.
 
-The owner drew it in ArtCraft as a 2880 px engraving-style image. The original is kept in craftrules
-at `craftrules/assets/app-icons/filmcraft/source.png` (not in this repo). It was vectorised with
-craftrules `assets/logo-options/_tools/vectorize_tile.py`, which keys the drawing to the three-colour
-palette and traces the ink with potrace. Licence: [LICENSE.txt](LICENSE.txt) (MIT OR Apache-2.0).
+`packaging/icons.sh` also generates `apps/filmcraft-web/web/favicon.png` from the compact source.
 
-## Files
-
-| File | What |
-|---|---|
-| `filmcraft.svg` | canonical artwork, traced at 2048 px (about 1 MB) |
-| `filmcraft-small.svg` | lighter trace at 1024 px (about 450 KB), for when size matters |
-| `filmcraft-1024.png` | 1024 px render |
-| `filmcraft-macos-512.png` | runtime Dock icon on macOS (embedded by `apps/filmcraft/src/main.rs`) |
-| `filmcraft.icns` | macOS bundle icon (`CFBundleIconFile`) |
-| `filmcraft.ico` | Windows icon, 16–256 px (embedded in `filmcraft.exe` by `apps/filmcraft/build.rs`) |
-| `hicolor/<size>/apps/ch.mixel.film.png`, `hicolor/scalable/…svg` | Linux icon theme, used by `packaging/linux/ch.mixel.film.desktop` |
-
-The web app's `apps/filmcraft-web/web/favicon.png` (128 px) comes from the same artwork.
-
-## How the icon reaches each OS
-
-- **macOS:** the window icon set at startup (`ViewportBuilder::with_icon`) is the Dock and app-switcher
-  icon when the app runs unbundled. A future `.app` bundle points `CFBundleIconFile` at `filmcraft.icns`.
-- **Windows:** `build.rs` embeds `filmcraft.ico` as the exe's resource icon (Explorer, Start menu,
-  pinned taskbar), and the runtime icon covers the window, taskbar and Alt-Tab.
-- **Linux:** the runtime icon plus `with_app_id("ch.mixel.film")`, which Wayland matches to
-  the `.desktop` file. Install the `hicolor/` tree under `/usr/share/icons/hicolor/` and the desktop
-  file under `/usr/share/applications/`.
+The separate App Store delivery is a full-square, opaque RGB 1024 PNG with a matching editable SVG. Keep this delivery outside the repository until deliberately integrated; it is distinct from a padded macOS icon. Actual dimensions and opacity must be checked after rendering. Production MAS packaging continues to consume the ICNS file.
 
 ## Regenerate
 
-`packaging/icons.sh` (needs `resvg`; `iconutil` on macOS for the `.icns`; the `.ico` is packed by
-`cargo xtask ico`). To change the artwork, replace `filmcraft.svg` and `filmcraft-small.svg` with new
-exports from craftrules, then run the script. Every derived file needs its `.attribution` sidecar
-and a row in `ATTRIBUTION.md`.
+Edit `filmcraft.svg`, mirror it byte-for-byte to `filmcraft-small.svg`, then run `packaging/icons.sh`. Preserve the exact SVG root header: existing macOS wrapper transforms, especially Effects, depend on it. The script keeps the established output paths, sizes, `resvg` rendering and macOS `iconutil` ICNS generation. ICO packing uses the existing `cargo xtask ico` helper; let it finish in the project’s authorized isolated Cargo target before starting another Cargo operation. The approximately 824-in-1024 macOS body and transparent outer margin remain the script’s responsibility.
+
+Render the separately delivered full-square App Store SVG directly to a 1024 PNG; do not substitute the macOS-padded image. Update current attribution metadata alongside actual generated assets. Run the repository’s existing applicable asset and CI gates after generation.
+
+## Rights and earlier artwork
+
+The supplied MIXEL master and branded composite icons have reserved brand rights under `LICENSE-MIXEL-brand.txt` (`LicenseRef-MIXEL-Brand`). Their use for these seven applications was requested by the project owner; no general public right to reuse or relicense the brand is asserted. The independently drawn product-symbol vector layers alone are original MIXEL contributor work under MIT OR Apache-2.0; see the scoped addendum in `LICENSE.txt` and the repository licence texts. Product-name paths come from the existing Inter SemiBold font; the complete `OFL-Inter.txt` is included. No new font binary is distributed by this icon revision.
+
+These app-icon filenames previously held the upstream owl with ear tufts artwork. The complete earlier licence and attribution are preserved at the start of `LICENSE.txt` and in historical metadata. Those notices remain active for any unchanged assets or retained derivatives; this app-icon replacement does not remove upstream root LICENSE or NOTICE text.
