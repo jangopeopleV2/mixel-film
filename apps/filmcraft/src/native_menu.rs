@@ -8,6 +8,9 @@ use filmcraft_ui_egui::menus::{MENUS, MenuItem as Item, NATIVE_APP_MENU, menu_it
 use muda::accelerator::Accelerator;
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 
+const PRIVACY_POLICY_MENU_ID: &str = "mixel.native.privacy-policy";
+const PRIVACY_POLICY_URL: &str = "https://www.mixel.ch/legal/craft/privacy/";
+
 fn accel(s: &str) -> Option<Accelerator> {
     // Only shortcuts with a modifier become native key equivalents (single keys stay in-app so
     // typing in fields keeps working).
@@ -98,12 +101,23 @@ pub fn install(app: &FilmcraftApp, ctx: egui::Context) -> (Receiver<String>, Men
     }
     bar.init_for_nsapp();
     if let Some(help) = bar.items().last().and_then(|i| i.as_submenu().cloned()) {
+        // Keep registry-driven items and attribution unchanged; this link belongs to the host.
+        let privacy = MenuItem::with_id(PRIVACY_POLICY_MENU_ID, "Privacy Policy", true, None);
+        let _ = help.append(&PredefinedMenuItem::separator());
+        let _ = help.append(&privacy);
         help.set_as_help_menu_for_nsapp();
     }
     Box::leak(Box::new(bar));
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         while let Ok(ev) = MenuEvent::receiver().recv() {
+            if ev.id().0 == PRIVACY_POLICY_MENU_ID {
+                if let Err(error) = open::that_detached(PRIVACY_POLICY_URL) {
+                    log::warn!("couldn't open the privacy policy: {error}");
+                }
+                ctx.request_repaint();
+                continue;
+            }
             if tx.send(ev.id().0.clone()).is_err() {
                 break;
             }
