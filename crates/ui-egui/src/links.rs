@@ -1,16 +1,13 @@
-//! Community and project links (Help menu, About dialog, header Discord button, Home screen).
+//! Community and project links (Help menu, About dialog, header project links, Home screen).
 //!
-//! MIXEL Film is part of the ArtCraft family: the community lives on the ArtCraft Discord, every
-//! app has a page on the ArtCraft website and a public GitHub repository.
+//! MIXEL Film exposes separate company, product project and source repository links.
 
 /// The app's short name, used in the website and repository URLs.
 pub const APP: &str = "filmcraft";
 
-/// The ArtCraft community Discord.
-pub const DISCORD: &str = "https://discord.gg/artcraft";
-/// The ArtCraft website.
-pub const WEBSITE: &str = "https://getartcraft.com";
-/// MIXEL Film's page on the ArtCraft website.
+/// The MIXEL company website.
+pub const WEBSITE: &str = "https://www.mixel.ch";
+/// MIXEL Film's project page.
 pub const APP_PAGE: &str = "https://github.com/jangopeopleV2/mixel-film";
 /// MIXEL Film's source repository.
 pub const GITHUB: &str = "https://github.com/jangopeopleV2/mixel-film";
@@ -18,9 +15,8 @@ pub const GITHUB: &str = "https://github.com/jangopeopleV2/mixel-film";
 pub const ISSUES: &str = "https://github.com/jangopeopleV2/mixel-film/issues";
 
 /// (command id, label, url) for every link, in menu order.
-pub const ALL: [(&str, &str, &str); 5] = [
-    ("help.discord", "Join the ArtCraft Discord…", DISCORD),
-    ("help.website", "ArtCraft Website", WEBSITE),
+pub const ALL: [(&str, &str, &str); 4] = [
+    ("help.website", "MIXEL Website", WEBSITE),
     ("help.appPage", "MIXEL Film project page", APP_PAGE),
     ("help.github", "MIXEL Film on GitHub", GITHUB),
     ("help.reportIssue", "Report an Issue…", ISSUES),
@@ -125,17 +121,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn urls_follow_the_artcraft_scheme() {
+    fn urls_follow_the_mixel_routes() {
         assert_eq!(APP_PAGE, "https://github.com/jangopeopleV2/mixel-film".to_string());
         assert_eq!(GITHUB, "https://github.com/jangopeopleV2/mixel-film".to_string());
         assert!(ALL.iter().all(|(id, _, u)| id.starts_with("help.") && u.starts_with("https://")));
-        assert_eq!(url_for("help.discord"), Some(DISCORD));
+        assert_eq!(url_for("help.discord"), None);
+        assert_eq!(url_for("help.website"), Some("https://www.mixel.ch"));
         assert_eq!(url_for("help.nope"), None);
     }
 
     #[test]
     fn links_open_through_the_host_hook() {
-        // #642: on the desktop every link (Help menu, About, Discord button, Import screen) must
+        // #642: on the desktop every link (Help menu, About, project links, Import screen) must
         // reach the host's browser opener; `ctx.open_url` alone is a no-op natively.
         use std::cell::RefCell;
         use std::rc::Rc;
@@ -152,8 +149,8 @@ mod tests {
             assert_eq!(r["url"], url, "{id}");
             assert_eq!(opened.borrow().last().map(String::as_str), Some(url), "{id}");
         }
-        open(&mut app, &ctx, DISCORD);
-        assert_eq!(opened.borrow().last().map(String::as_str), Some(DISCORD));
+        open(&mut app, &ctx, WEBSITE);
+        assert_eq!(opened.borrow().last().map(String::as_str), Some(WEBSITE));
         assert_eq!(opened.borrow().len(), ALL.len() + 1);
 
         // A failing opener falls back to `ctx.open_url` instead of losing the click.
@@ -164,6 +161,88 @@ mod tests {
         assert_eq!(fallback, [ISSUES]);
         // ... and keeps the address on screen with the reason until the dialog is closed
         assert_eq!(app.ui.failed_link, Some(FailedLink { url: ISSUES.into(), error: "no browser".into() }));
+    }
+
+    #[test]
+    fn import_screen_resource_links_render_declared_labels_and_open_matching_urls() {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+
+        struct RestoreLanguage(crate::i18n::Language);
+        impl Drop for RestoreLanguage {
+            fn drop(&mut self) {
+                crate::i18n::set_current(self.0);
+            }
+        }
+        let _language = RestoreLanguage(crate::i18n::current());
+        crate::i18n::set_current(crate::i18n::Language::En);
+        let opened: Rc<RefCell<Vec<String>>> = Rc::default();
+        let record = opened.clone();
+        let mut app = crate::FilmcraftApp::new(filmcraft_engine::Session::default());
+        app.hooks.open_url = Some(Box::new(move |url: &str| {
+            record.borrow_mut().push(url.to_string());
+            Ok(())
+        }));
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &crate::theme::Tokens::for_kind(Default::default()));
+        let time = Cell::new(0.0);
+        let frame = |app: &mut crate::FilmcraftApp, events: Vec<egui::Event>| {
+            app.auto.begin_frame();
+            time.set(time.get() + 0.05);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 760.0))),
+                time: Some(time.get()),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                let rect = ui.max_rect();
+                crate::panels::import_mode::show(app, ui, rect);
+            });
+            out.textures_delta.clear();
+            out
+        };
+        frame(&mut app, Vec::new());
+        let out = frame(&mut app, Vec::new());
+        let expected = [
+            ("website", "MIXEL Website", "https://www.mixel.ch"),
+            ("appPage", "MIXEL Film project page", "https://github.com/jangopeopleV2/mixel-film"),
+            ("github", "MIXEL Film on GitHub", "https://github.com/jangopeopleV2/mixel-film"),
+            ("reportIssue", "Report an Issue…", "https://github.com/jangopeopleV2/mixel-film/issues"),
+        ];
+        let labels: Vec<(String, String)> = app
+            .auto
+            .elements
+            .iter()
+            .filter(|element| element.id.starts_with("import.link."))
+            .map(|element| (element.id.clone(), element.label.clone()))
+            .collect();
+        assert_eq!(labels, expected.map(|(id, label, _)| (format!("import.link.{id}"), label.to_string())));
+        fn painted_text(shape: &egui::Shape, labels: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => labels.push(text.galley.text().to_string()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| painted_text(shape, labels)),
+                _ => {}
+            }
+        }
+        let mut painted = Vec::new();
+        out.shapes.iter().for_each(|shape| painted_text(&shape.shape, &mut painted));
+        for (_, label, _) in expected {
+            assert!(painted.iter().any(|text| text == label), "missing painted label {label}: {painted:?}");
+        }
+        assert!(painted.iter().all(|text| !text.contains("Discord")), "{painted:?}");
+        for (index, (id, _, url)) in expected.into_iter().enumerate() {
+            let element = app.auto.elements.iter().find(|element| element.id == format!("import.link.{id}")).unwrap();
+            let at = egui::pos2(element.rect[0] + element.rect[2] / 2.0, element.rect[1] + element.rect[3] / 2.0);
+            let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+            for events in [vec![egui::Event::PointerMoved(at)], vec![button(true)], vec![button(false)], Vec::new()] {
+                let out = frame(&mut app, events);
+                assert!(!out.platform_output.commands.iter().any(|command| matches!(command, egui::OutputCommand::OpenUrl(_))));
+            }
+            assert_eq!(opened.borrow().len(), index + 1, "one host-hook call for {id}");
+            assert_eq!(opened.borrow().last().map(String::as_str), Some(url), "{id}");
+            assert!(app.ui.failed_link.is_none());
+        }
     }
 
     /// The failed-link dialog shows the address until it is closed, and Copy copies it.
