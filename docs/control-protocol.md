@@ -192,3 +192,7 @@ resizes the root split; path entries use `false` for the first child and `true` 
 the second. `{"action":{"MoveFloating":{"panel":"Info","rect":[45,65,420,320]}}}`
 repositions and resizes the floating group containing Info. Invalid actions leave the
 layout unchanged. Pointer gestures dispatch through this same catalog command.
+
+## MIXEL company and project links
+
+`help.website` opens `https://www.mixel.ch`; `help.appPage` remains the product project page. `help.discord` is not registered.
