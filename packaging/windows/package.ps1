@@ -88,6 +88,24 @@ Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 Copy-Item (Join-Path $Bin 'filmcraft.exe'), (Join-Path $Bin 'filmcraft-cli.exe') $Stage
 
+# Full notices for the frozen epaint_default_fonts 0.36.2 lock and application attribution.
+$LegalStage = Join-Path $Stage 'Licenses'
+$LegalFiles = @(
+  @{ Source = 'NOTICE'; Destination = 'NOTICE' },
+  @{ Source = 'ATTRIBUTION.md'; Destination = 'ATTRIBUTION.md' },
+  @{ Source = 'packaging\licenses\epaint_default_fonts-0.36.2\Hack-Regular.txt'; Destination = 'epaint_default_fonts-0.36.2\Hack-Regular.txt' },
+  @{ Source = 'packaging\licenses\epaint_default_fonts-0.36.2\OFL.txt'; Destination = 'epaint_default_fonts-0.36.2\OFL.txt' },
+  @{ Source = 'packaging\licenses\epaint_default_fonts-0.36.2\UFL.txt'; Destination = 'epaint_default_fonts-0.36.2\UFL.txt' },
+  @{ Source = 'packaging\licenses\epaint_default_fonts-0.36.2\emoji-icon-font-mit-license.txt'; Destination = 'epaint_default_fonts-0.36.2\emoji-icon-font-mit-license.txt' }
+)
+foreach ($legalNotice in $LegalFiles) {
+  $legalSource = Join-Path $Root $legalNotice.Source
+  if (-not (Test-Path -LiteralPath $legalSource -PathType Leaf)) { throw "Missing legal notice: $legalSource" }
+  $legalDestination = Join-Path $LegalStage $legalNotice.Destination
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $legalDestination) -ErrorAction Stop | Out-Null
+  Copy-Item -LiteralPath $legalSource -Destination $legalDestination -ErrorAction Stop
+}
+
 & (Join-Path $PSScriptRoot 'sign.ps1') (Join-Path $Stage 'filmcraft.exe') (Join-Path $Stage 'filmcraft-cli.exe')
 
 # ---- MSI ---------------------------------------------------------------------------------------
@@ -106,6 +124,7 @@ $Portable = Join-Path $TargetDir "windows-package\filmcraft-$Version-windows-$Ar
 Remove-Item -Recurse -Force $Portable -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Portable | Out-Null
 Copy-Item (Join-Path $Stage '*.exe') $Portable
+Copy-Item -LiteralPath $LegalStage -Destination (Join-Path $Portable 'Licenses') -Recurse -ErrorAction Stop
 # The marker that makes MIXEL Film keep its data in .\data next to the exe instead of %APPDATA% (#139).
 Set-Content -Encoding ascii -Path (Join-Path $Portable 'portable.txt') -Value @(
   'MIXEL Film portable: preferences, presets, logs and crash recovery are kept in the data folder',
